@@ -1,0 +1,14 @@
+.vercel
+.env
+.env.local
+supabase/.env.local
+
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+
+desktop.ini
+Default.rdp
+*.pdf
+"culture_app copy.py"

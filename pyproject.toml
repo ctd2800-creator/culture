@@ -1,0 +1,13 @@
+[project]
+name = "culture"
+version = "1.0.0"
+description = "Supabase 데이터 요약 + LangGraph + Amazon Bedrock"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "Flask>=3.0.0",
+    "boto3>=1.34.0",
+    "psycopg2-binary>=2.9.9",
+    "langgraph>=0.2.0",
+    "python-dotenv>=1.0.0",
+]
