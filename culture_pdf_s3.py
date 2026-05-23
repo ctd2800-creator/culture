@@ -42,10 +42,60 @@ def _presigned_expires() -> int:
         return 604800
 
 
+_FONT_DIR = Path(__file__).resolve().parent / "fonts"
+_FONT_CACHE_DIR = Path(
+    os.environ.get("CULTURE_FONT_CACHE_DIR", os.environ.get("TMPDIR", "/tmp"))
+) / "culture-fonts"
+_FONT_DOWNLOAD_URLS = (
+    "https://raw.githubusercontent.com/frappe/fonts/master/usr_share_fonts/noto/NotoSansKR-Regular.otf",
+)
+
+
+def _bundled_font_candidates() -> list[Path]:
+    return [
+        _FONT_DIR / "NotoSansKR-Regular.otf",
+        _FONT_DIR / "NotoSansKR-Regular.ttf",
+    ]
+
+
+def _download_font_to(path: Path) -> None:
+    import urllib.request
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_err: Exception | None = None
+    for url in _FONT_DOWNLOAD_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Culture/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = resp.read()
+            if len(data) < 100_000:
+                raise RuntimeError(f"폰트 파일 크기 비정상 ({len(data)} bytes)")
+            path.write_bytes(data)
+            return
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"한글 폰트 다운로드 실패: {last_err}") from last_err
+
+
+def _ensure_font_file() -> Path:
+    for candidate in _bundled_font_candidates():
+        if candidate.is_file() and candidate.stat().st_size > 100_000:
+            return candidate
+    cached = _FONT_CACHE_DIR / "NotoSansKR-Regular.otf"
+    if cached.is_file() and cached.stat().st_size > 100_000:
+        return cached
+    _download_font_to(cached)
+    return cached
+
+
 def _find_korean_font() -> str:
     custom = os.environ.get("CULTURE_PDF_FONT", "").strip()
     if custom and Path(custom).is_file():
         return custom
+    try:
+        return str(_ensure_font_file())
+    except Exception:
+        pass
     for candidate in (
         Path(r"C:\Windows\Fonts\malgun.ttf"),
         Path(r"C:\Windows\Fonts\malgunsl.ttf"),
@@ -56,6 +106,7 @@ def _find_korean_font() -> str:
             return str(candidate)
     raise RuntimeError(
         "한글 PDF 폰트를 찾을 수 없습니다. "
+        "culture/fonts/NotoSansKR-Regular.ttf 를 확인하거나 "
         "CULTURE_PDF_FONT 환경 변수에 TTF/OTF 경로를 지정하세요."
     )
 
