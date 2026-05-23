@@ -10,4 +10,6 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "langgraph>=0.2.0",
     "python-dotenv>=1.0.0",
+    "fpdf2>=2.8.0",
+    "matplotlib>=3.8.0",
 ]

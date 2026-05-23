@@ -36,6 +36,7 @@ try:
 except ImportError:
     pass
 
+from culture_pdf_s3 import s3_configured
 from culture_workflow import (
     aws_credentials_configured,
     aws_session_token_configured,
@@ -158,7 +159,7 @@ def run_chat(
     history: list[dict],
     *,
     table_name: str | None = None,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, list[dict[str, Any]], str]:
     """LangGraph Executor로 Fetch → Summarize → Reply 실행."""
     if is_summary_request(raw) and not supabase_configured():
         raise RuntimeError(
@@ -169,7 +170,9 @@ def run_chat(
     if final.get("error") and not reply:
         raise RuntimeError(final["error"])
     notice = final.get("notice") or None
-    return reply, notice
+    charts = list(final.get("chart_specs") or [])
+    pdf_url = (final.get("pdf_url") or "").strip()
+    return reply, notice, charts, pdf_url
 
 
 def ensure_session_lists():
@@ -375,6 +378,37 @@ PAGE = """
       margin: 0;
       padding: 8px 4px;
     }
+    .msg-text { white-space: pre-wrap; word-break: break-word; }
+    .chart-block {
+      margin-top: 14px;
+      padding: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+    }
+    .chart-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #475569;
+      margin: 0 0 8px;
+    }
+    .chart-canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: min(280px, 42vh);
+    }
+    .pdf-link-wrap {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px dashed #cbd5e1;
+    }
+    .pdf-link {
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 600;
+      color: #6d28d9;
+      word-break: break-all;
+    }
 
     @media (max-width: 520px) {
       body {
@@ -442,7 +476,8 @@ PAGE = """
     </div>
   </section>
   </div>
-  <script src="/static/culture_chat.js?v=7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/static/culture_chat.js?v=9"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
@@ -476,13 +511,28 @@ def chat_api():
     history = list(session.get("chat_history", []))
     history.append({"role": "user", "content": raw})
     try:
-        reply, notice = run_chat(raw, history, table_name=table_name)
+        reply, notice, charts, pdf_url = run_chat(raw, history, table_name=table_name)
         if not reply.strip():
             reply = "(모델이 빈 응답을 반환했습니다.)"
-        history.append({"role": "assistant", "content": reply})
+        history.append(
+            {
+                "role": "assistant",
+                "content": reply,
+                "charts": charts,
+                "pdf_url": pdf_url,
+            }
+        )
         session["chat_history"] = history
         session.modified = True
-        return jsonify({"ok": True, "reply": reply, "notice": notice or ""})
+        return jsonify(
+            {
+                "ok": True,
+                "reply": reply,
+                "notice": notice or "",
+                "charts": charts,
+                "pdf_url": pdf_url,
+            }
+        )
     except Exception as e:
         err = format_aws_error(e)
         history.append({"role": "assistant", "content": f"(처리 실패: {err})"})
@@ -521,7 +571,8 @@ def chat_stream():
     _NODE_STATUS = {
         "parse": "요청 분석 (State: month)…",
         "fetch": "Fetch — Supabase 데이터 추출…",
-        "summarize": "Summarize — Claude Sonnet 3.5 요약…",
+        "summarize": "Summarize — Claude Sonnet 요약…",
+        "export_pdf": "PDF 생성 및 S3 저장…",
         "general": "일반 대화 응답 생성…",
         "reply": "Reply — 최종 응답 조립…",
     }
@@ -561,12 +612,29 @@ def chat_stream():
             if not full_text:
                 full_text = "(모델이 빈 응답을 반환했습니다.)"
             notice = final.get("notice") or ""
-            history.append({"role": "assistant", "content": full_text})
+            charts = list(final.get("chart_specs") or [])
+            pdf_url = (final.get("pdf_url") or "").strip()
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": full_text,
+                    "charts": charts,
+                    "pdf_url": pdf_url,
+                }
+            )
             session["chat_history"] = history
             session.modified = True
             yield _sse_event({"type": "chunk", "text": full_text})
             yield _sse_pad()
-            yield _sse_event({"type": "done", "text": full_text, "notice": notice})
+            yield _sse_event(
+                {
+                    "type": "done",
+                    "text": full_text,
+                    "notice": notice,
+                    "charts": charts,
+                    "pdf_url": pdf_url,
+                }
+            )
         except Exception as e:
             err = format_aws_error(e)
             history.append({"role": "assistant", "content": f"(처리 실패: {err})"})
@@ -604,7 +672,8 @@ def api_health():
         "bedrock_region": bedrock_region(),
         "bedrock_model_id": get_model_id(),
         "workflow": "langgraph",
-        "nodes": ["parse", "fetch", "summarize", "reply", "general"],
+        "nodes": ["parse", "fetch", "summarize", "export_pdf", "reply", "general"],
+        "s3_configured": s3_configured(),
     }
     if request.args.get("db") == "1" and supabase_configured():
         try:

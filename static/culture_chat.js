@@ -1,9 +1,10 @@
-/* Culture chat UI — sync API + optional SSE stream */
+/* Culture chat UI — sync API + optional SSE stream + summary bar charts */
 window.CultureChat = {
   init(opts) {
     const STREAM_URL = "/api/chat/stream";
     const CHAT_URL = "/api/chat";
     const history = opts.history || [];
+    let chartUid = 0;
 
     const chatBox = document.getElementById("chatBox");
     const messageInput = document.getElementById("messageInput");
@@ -27,14 +28,76 @@ window.CultureChat = {
       });
     }
 
-    function appendMsg(role, content, streaming) {
+    function renderCharts(container, charts) {
+      if (!charts || !charts.length || typeof Chart === "undefined") return;
+      charts.forEach((spec) => {
+        const block = document.createElement("div");
+        block.className = "chart-block";
+        const title = document.createElement("p");
+        title.className = "chart-title";
+        title.textContent = spec.title || "막대그래프";
+        block.appendChild(title);
+        const wrap = document.createElement("div");
+        wrap.className = "chart-canvas-wrap";
+        const canvas = document.createElement("canvas");
+        const canvasId = "culture-chart-" + ++chartUid;
+        canvas.id = canvasId;
+        wrap.appendChild(canvas);
+        block.appendChild(wrap);
+        container.appendChild(block);
+        new Chart(canvas, {
+          type: spec.type || "bar",
+          data: {
+            labels: spec.labels || [],
+            datasets: spec.datasets || [],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: (spec.datasets || []).length > 1 },
+            },
+            scales: {
+              y: { beginAtZero: true },
+            },
+          },
+        });
+      });
+      scrollChatToBottom();
+    }
+
+    function renderPdfLink(container, pdfUrl) {
+      if (!pdfUrl) return;
+      const wrap = document.createElement("div");
+      wrap.className = "pdf-link-wrap";
+      const link = document.createElement("a");
+      link.className = "pdf-link";
+      link.href = pdfUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "PDF 다운로드 (S3)";
+      wrap.appendChild(link);
+      container.appendChild(wrap);
+      scrollChatToBottom();
+    }
+
+    function appendMsg(role, content, streaming, charts, pdfUrl) {
       clearHint();
       const el = document.createElement("div");
       el.className = "msg " + role + (streaming ? " streaming" : "");
-      el.textContent = content;
+      const textEl = document.createElement("div");
+      textEl.className = "msg-text";
+      textEl.textContent = content;
+      el.appendChild(textEl);
+      if (role === "assistant" && charts && charts.length) {
+        renderCharts(el, charts);
+      }
+      if (role === "assistant" && pdfUrl) {
+        renderPdfLink(el, pdfUrl);
+      }
       chatBox.appendChild(el);
       scrollChatToBottom();
-      return el;
+      return { el, textEl };
     }
 
     function renderHistory(items) {
@@ -48,7 +111,15 @@ window.CultureChat = {
         chatBox.appendChild(hint);
         return;
       }
-      items.forEach((item) => appendMsg(item.role, item.content || "", false));
+      items.forEach((item) =>
+        appendMsg(
+          item.role,
+          item.content || "",
+          false,
+          item.charts || [],
+          item.pdf_url || ""
+        )
+      );
     }
 
     function processSsePart(part, state) {
@@ -65,13 +136,19 @@ window.CultureChat = {
           statusLine.textContent = payload.text || "";
         } else if (payload.type === "chunk") {
           state.full += payload.text || "";
-          state.assistantEl.textContent = state.full;
+          state.textEl.textContent = state.full;
           scrollChatToBottom();
         } else if (payload.type === "error") {
           throw new Error(payload.text || "오류");
         } else if (payload.type === "done") {
           if (payload.text) state.full = payload.text;
-          state.assistantEl.textContent = state.full;
+          state.textEl.textContent = state.full;
+          if (payload.charts && payload.charts.length) {
+            renderCharts(state.el, payload.charts);
+          }
+          if (payload.pdf_url) {
+            renderPdfLink(state.el, payload.pdf_url);
+          }
           if (payload.notice) {
             chatNotice.textContent = payload.notice;
             chatNotice.style.display = "block";
@@ -80,7 +157,7 @@ window.CultureChat = {
       }
     }
 
-    async function sendViaStream(text, assistantEl, state) {
+    async function sendViaStream(text, msgParts, state) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(STREAM_URL, {
@@ -114,7 +191,7 @@ window.CultureChat = {
       if (buffer.trim()) processSsePart(buffer, state);
     }
 
-    async function sendViaJson(text, assistantEl, state) {
+    async function sendViaJson(text, msgParts, state) {
       statusLine.textContent = "응답 생성 중… (Bedrock 호출, 10~60초)";
       const res = await fetch(CHAT_URL, {
         method: "POST",
@@ -127,7 +204,13 @@ window.CultureChat = {
         throw new Error(data.error || "요청 실패 (" + res.status + ")");
       }
       state.full = data.reply || "";
-      assistantEl.textContent = state.full;
+      state.textEl.textContent = state.full;
+      if (data.charts && data.charts.length) {
+        renderCharts(state.el, data.charts);
+      }
+      if (data.pdf_url) {
+        renderPdfLink(state.el, data.pdf_url);
+      }
       if (data.notice) {
         chatNotice.textContent = data.notice;
         chatNotice.style.display = "block";
@@ -144,32 +227,32 @@ window.CultureChat = {
       chatNotice.style.display = "none";
 
       appendMsg("user", text, false);
-      const assistantEl = appendMsg("assistant", "…", true);
-      const state = { full: "", assistantEl };
+      const msgParts = appendMsg("assistant", "…", true);
+      const state = { full: "", el: msgParts.el, textEl: msgParts.textEl };
 
       try {
         const useStream = opts.preferStream !== false;
         if (useStream) {
           try {
             statusLine.textContent = "스트리밍 연결 중…";
-            await sendViaStream(text, assistantEl, state);
+            await sendViaStream(text, msgParts, state);
           } catch (streamErr) {
             console.warn("stream fallback:", streamErr);
-            assistantEl.textContent = "…";
-            await sendViaJson(text, assistantEl, state);
+            state.textEl.textContent = "…";
+            await sendViaJson(text, msgParts, state);
           }
         } else {
-          await sendViaJson(text, assistantEl, state);
+          await sendViaJson(text, msgParts, state);
         }
 
         if (!state.full.trim()) {
-          assistantEl.textContent = "(응답 본문이 비어 있습니다.)";
+          state.textEl.textContent = "(응답 본문이 비어 있습니다.)";
         }
-        assistantEl.classList.remove("streaming");
+        state.el.classList.remove("streaming");
         statusLine.textContent = "";
       } catch (err) {
-        assistantEl.classList.remove("streaming");
-        assistantEl.textContent = "(처리 실패: " + err.message + ")";
+        state.el.classList.remove("streaming");
+        state.textEl.textContent = "(처리 실패: " + err.message + ")";
         statusLine.textContent = "";
         console.error(err);
       } finally {

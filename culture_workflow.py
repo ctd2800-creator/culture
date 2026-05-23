@@ -71,6 +71,8 @@ class CultureState(TypedDict, total=False):
     raw_data: list[dict[str, Any]]
     summary: str
     reply: str
+    chart_specs: list[dict[str, Any]]
+    pdf_url: str
     notice: str
     error: str
     is_summary_request: bool
@@ -354,6 +356,74 @@ def is_summary_request(text: str, api_table: str | None = None) -> bool:
     )
 
 
+def _numeric(val: Any) -> float:
+    if val is None:
+        return 0.0
+    if isinstance(val, Decimal):
+        return float(val)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_chart_specs(
+    rows: list[dict[str, Any]],
+    *,
+    month: str,
+    table: str,
+) -> list[dict[str, Any]]:
+    """요약 응답용 Chart.js 막대그래프 스펙 (고객수비율·고객수)."""
+    if not rows:
+        return []
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda r: (
+            str(r.get("계열사그룹구분") or ""),
+            str(r.get("계열사등급구분내용") or ""),
+        ),
+    )
+    labels = [
+        f"{r.get('계열사그룹구분')}-등급{r.get('계열사등급구분내용')}"
+        for r in sorted_rows
+    ]
+    ratio_data = [_numeric(r.get("고객수비율")) for r in sorted_rows]
+    count_data = [_numeric(r.get("고객수")) for r in sorted_rows]
+    month_label = format_yyyymm(month)
+
+    return [
+        {
+            "type": "bar",
+            "title": f"{table} · 고객수비율 (%) — {month_label}",
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "고객수비율 (%)",
+                    "data": ratio_data,
+                    "backgroundColor": "rgba(124, 58, 237, 0.78)",
+                    "borderColor": "rgba(109, 40, 217, 1)",
+                    "borderWidth": 1,
+                }
+            ],
+        },
+        {
+            "type": "bar",
+            "title": f"{table} · 고객수 — {month_label}",
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "고객수",
+                    "data": count_data,
+                    "backgroundColor": "rgba(16, 185, 129, 0.78)",
+                    "borderColor": "rgba(5, 150, 105, 1)",
+                    "borderWidth": 1,
+                }
+            ],
+        },
+    ]
+
+
 def fetch_table_rows(table_name: str, yyyymm: str) -> list[dict[str, Any]]:
     sql = f"""
         SELECT
@@ -527,7 +597,33 @@ def summarize_node(state: CultureState) -> dict[str, Any]:
         "위 데이터의 수치·비중·특이점을 한국어로 요약하세요."
     )
     summary = ask_bedrock(SUMMARY_SYSTEM_PROMPT, [{"role": "user", "content": prompt}], 2048)
-    return {"summary": summary}
+    charts = build_chart_specs(rows, month=month, table=table)
+    return {"summary": summary, "chart_specs": charts}
+
+
+def export_pdf_node(state: CultureState) -> dict[str, Any]:
+    """요약 응답을 PDF로 만들어 S3에 저장."""
+    if state.get("error") or state.get("needs_input"):
+        return {}
+    if not state.get("is_summary_request"):
+        return {}
+    summary = (state.get("summary") or "").strip()
+    if not summary:
+        return {}
+    try:
+        from culture_pdf_s3 import upload_summary_pdf
+
+        url = upload_summary_pdf(
+            summary=summary,
+            table=state.get("table_name") or TABLE_NAME,
+            month=state.get("month") or "",
+            chart_specs=state.get("chart_specs") or [],
+        )
+        return {"pdf_url": url}
+    except Exception as e:
+        prev = (state.get("notice") or "").strip()
+        msg = f"PDF S3 저장 실패: {e}"
+        return {"notice": f"{prev}\n{msg}".strip() if prev else msg}
 
 
 def general_chat_node(state: CultureState) -> dict[str, Any]:
@@ -547,9 +643,17 @@ def reply_node(state: CultureState) -> dict[str, Any]:
     if state.get("needs_input") and preset:
         return {"reply": preset, "summary": preset, "notice": ""}
     summary = (state.get("summary") or "").strip()
+    charts = list(state.get("chart_specs") or [])
     if not summary:
-        return {"reply": "(요약 결과가 비어 있습니다.)", "summary": ""}
-    return {"reply": summary, "summary": summary, "notice": ""}
+        return {"reply": "(요약 결과가 비어 있습니다.)", "summary": "", "chart_specs": charts}
+    pdf_url = (state.get("pdf_url") or "").strip()
+    return {
+        "reply": summary,
+        "summary": summary,
+        "chart_specs": charts,
+        "pdf_url": pdf_url,
+        "notice": (state.get("notice") or "").strip(),
+    }
 
 
 def route_after_parse(state: CultureState) -> Literal["fetch", "general", "reply"]:
@@ -565,6 +669,7 @@ def build_culture_graph():
     graph.add_node("parse", parse_node)
     graph.add_node("fetch", fetch_node)
     graph.add_node("summarize", summarize_node)
+    graph.add_node("export_pdf", export_pdf_node)
     graph.add_node("general", general_chat_node)
     graph.add_node("reply", reply_node)
 
@@ -575,7 +680,8 @@ def build_culture_graph():
         {"fetch": "fetch", "general": "general", "reply": "reply"},
     )
     graph.add_edge("fetch", "summarize")
-    graph.add_edge("summarize", "reply")
+    graph.add_edge("summarize", "export_pdf")
+    graph.add_edge("export_pdf", "reply")
     graph.add_edge("general", "reply")
     graph.add_edge("reply", END)
     return graph
@@ -608,6 +714,8 @@ def run_workflow(
         "raw_data": [],
         "summary": "",
         "reply": "",
+        "chart_specs": [],
+        "pdf_url": "",
         "notice": "",
         "error": "",
         "needs_input": False,
