@@ -17,6 +17,7 @@ from culture_workflow import format_yyyymm
 
 # matplotlib는 PDF 차트 렌더 시에만 로드 (서버리스 콜드스타트 완화)
 _MPL_READY = False
+_KOREAN_FONT_PROP: Any = None
 
 
 def s3_bucket() -> str:
@@ -47,13 +48,13 @@ _FONT_CACHE_DIR = Path(
     os.environ.get("CULTURE_FONT_CACHE_DIR", os.environ.get("TMPDIR", "/tmp"))
 ) / "culture-fonts"
 _FONT_DOWNLOAD_URLS = (
-    "https://raw.githubusercontent.com/frappe/fonts/master/usr_share_fonts/noto/NotoSansKR-Regular.otf",
+    "https://hangeul.pstatic.net/hangeul_static/webfont/NanumGothic/NanumGothic.ttf",
 )
 
 
 def _bundled_font_candidates() -> list[Path]:
     return [
-        _FONT_DIR / "NotoSansKR-Regular.otf",
+        _FONT_DIR / "NanumGothic.ttf",
         _FONT_DIR / "NotoSansKR-Regular.ttf",
     ]
 
@@ -81,7 +82,7 @@ def _ensure_font_file() -> Path:
     for candidate in _bundled_font_candidates():
         if candidate.is_file() and candidate.stat().st_size > 100_000:
             return candidate
-    cached = _FONT_CACHE_DIR / "NotoSansKR-Regular.otf"
+    cached = _FONT_CACHE_DIR / "NanumGothic.ttf"
     if cached.is_file() and cached.stat().st_size > 100_000:
         return cached
     _download_font_to(cached)
@@ -146,6 +147,15 @@ def _write_block(pdf: FPDF, text: str, *, line_h: float) -> None:
     pdf.multi_cell(pdf.epw, line_h, text or "")
 
 
+def _korean_font_properties():
+    global _KOREAN_FONT_PROP
+    if _KOREAN_FONT_PROP is None:
+        from matplotlib.font_manager import FontProperties
+
+        _KOREAN_FONT_PROP = FontProperties(fname=_find_korean_font())
+    return _KOREAN_FONT_PROP
+
+
 def _ensure_matplotlib() -> None:
     global _MPL_READY
     if _MPL_READY:
@@ -154,12 +164,8 @@ def _ensure_matplotlib() -> None:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib import font_manager
 
-    font_path = _find_korean_font()
-    font_manager.fontManager.addfont(font_path)
-    family = font_manager.FontProperties(fname=font_path).get_name()
-    plt.rcParams["font.family"] = family
+    _korean_font_properties()
     plt.rcParams["axes.unicode_minus"] = False
     _MPL_READY = True
 
@@ -205,10 +211,13 @@ def _render_chart_png(spec: dict[str, Any]) -> bytes:
     fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=120)
     x = range(len(labels))
     ax.bar(x, values, color=bar_color, edgecolor=edge_color, linewidth=0.8)
+    ko_font = _korean_font_properties()
     ax.set_xticks(list(x))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel(y_label, fontsize=9)
-    ax.set_title(title, fontsize=11, pad=12)
+    ax.set_xticklabels(
+        labels, rotation=45, ha="right", fontsize=8, fontproperties=ko_font
+    )
+    ax.set_ylabel(y_label, fontsize=9, fontproperties=ko_font)
+    ax.set_title(title, fontsize=11, pad=12, fontproperties=ko_font)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
     fig.tight_layout()
@@ -244,6 +253,7 @@ def build_summary_pdf_bytes(
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    # TTF(TrueType)만 사용 — PostScript OTF는 fpdf2에서 한글이 깨질 수 있음
     pdf.add_font("CultureKR", "", font_path)
     pdf.set_font("CultureKR", size=14)
     _write_block(pdf, title, line_h=9)
@@ -267,6 +277,7 @@ def build_summary_pdf_bytes(
             # 차트 높이(약 55mm) + 여백 확보 후 페이지 넘김
             if pdf.get_y() > pdf.h - 70:
                 pdf.add_page()
+                pdf.set_font("CultureKR", size=11)
             try:
                 _embed_chart(pdf, spec)
             except Exception:

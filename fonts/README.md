@@ -1,5 +1,7 @@
 # PDF 한글 폰트
 
-`NotoSansKR-Regular.otf` — [Noto Sans KR](https://fonts.google.com/noto/specimen/Noto+Sans+KR) (OFL-1.1)
+`NanumGothic.ttf` — 나눔고딕 ([네이버 나눔폰트](https://hangeul.naver.com/font), OFL)
 
-Vercel/Linux에서 PDF·차트 한글 렌더에 사용합니다. 파일이 없으면 런타임에 GitHub에서 자동 다운로드합니다.
+`NotoSansKR-Regular.ttf` — 동일 파일 별칭(하위 호환)
+
+PostScript OTF는 fpdf2에서 한글이 깨질 수 있어 **TTF만** 사용합니다.
