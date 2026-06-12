@@ -1,23 +1,35 @@
 """
 Culture LangGraph 워크플로우
-  Fetch → Summarize → Reply
-  State: month → raw_data → summary → reply
+  analyze → (table_prompt | column_desc | data_summary | fetch_inst1 | general) → reply
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
-from decimal import Decimal
 from typing import Any, Literal, TypedDict
 
 import boto3
-import psycopg2
 from botocore.exceptions import ClientError
 from langgraph.graph import END, START, StateGraph
 
-from supabase.table_config import TABLE_NAME, TABLE_QUERY_KEYWORDS
+from culture_inst1_agents import (
+    AGGREGATE_CHART_FOLLOW_UP,
+    INST1_TABLE_KOREAN_NAMES,
+    analyze_question,
+    build_aggregate_chart_specs,
+    build_inst1_excel_export,
+    build_pending_chart_payload,
+    build_report_export,
+    explain_inst1_columns,
+    extract_inst1_data,
+    format_chart_agent_reply,
+    format_inst1_aggregate_prompt_reply,
+    format_inst1_reply,
+    format_inst1_table_prompt_reply,
+    summarize_inst1_table_data,
+    with_agent_banner,
+)
 
 # Claude Sonnet 최신 (Bedrock) — BEDROCK_MODEL_ID 로 덮어쓸 수 있음
 MODEL_ID = "anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -46,20 +58,8 @@ _BEDROCK_RETRY_ERROR_CODES = frozenset(
     }
 )
 
-SUMMARY_SYSTEM_PROMPT = """당신은 금융·계열사 고객지표 데이터 분석가입니다.
-주어진 JSON 데이터만 근거로 한국어로 요약·분석하세요.
-반드시 다음 세 가지 관점을 포함하세요.
-1. 수치: 주요 지표의 규모·증감
-2. 비중: 고객수비율·구성 비율
-3. 특이점: 눈에 띄는 등급·그룹별 이상 패턴
-- 계열사그룹구분(KBO, KCO 등)별로 구분해 설명하세요.
-- NULL은 데이터 없음으로 해석하세요.
-- 핵심 인사이트 3~6문장 + 필요 시 짧은 bullet로 정리하세요."""
-
 GENERAL_SYSTEM_PROMPT = """당신은 Culture 앱의 한국어 AI 어시스턴트입니다.
 사용자와 자연스럽게 대화하세요."""
-
-GUIDE_MISSING_INPUT = "테이블명, 기준년월을 포함해 주세요."
 
 
 class CultureState(TypedDict, total=False):
@@ -68,19 +68,25 @@ class CultureState(TypedDict, total=False):
     user_message: str
     table_name: str
     month: str
-    raw_data: list[dict[str, Any]]
     summary: str
     reply: str
-    chart_specs: list[dict[str, Any]]
-    pdf_url: str
     notice: str
     error: str
-    is_summary_request: bool
-    needs_input: bool
     history: list[dict[str, str]]
+    question_analysis: dict[str, Any]
+    inst1_data: dict[str, list[dict[str, Any]]]
+    inst1_column_orders: dict[str, list[str]]
+    inst1_result_labels: dict[str, str]
+    inst1_queries: dict[str, str]
+    extract_tables: list[str]
+    pending_aggregate: dict[str, Any]
+    pending_chart: dict[str, Any]
+    chart_specs: list[dict[str, Any]]
+    excel_export: dict[str, Any]
+    report_export: dict[str, Any]
+    follow_up_questions: list[str]
 
 
-_db_url_cache: str | None = None
 _graph_executor = None
 _bedrock_clients: dict[str, Any] = {}
 
@@ -138,23 +144,6 @@ def bedrock_regions_to_try() -> list[str]:
     """(하위 호환) 첫 모델 기준 리전 목록."""
     primary_model = bedrock_models_to_try()[0]
     return bedrock_regions_for_model(primary_model)
-
-
-def get_db_url() -> str:
-    global _db_url_cache
-    if _db_url_cache is not None:
-        return _db_url_cache
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-    if not raw:
-        raise RuntimeError("`SUPABASE_DB_URL` 환경 변수를 설정해야 합니다.")
-    if "sslmode=" not in raw:
-        raw += ("&" if "?" in raw else "?") + "sslmode=require"
-    _db_url_cache = raw
-    return _db_url_cache
-
-
-def get_conn():
-    return psycopg2.connect(get_db_url(), connect_timeout=15)
 
 
 def _get_aws_session_token() -> str:
@@ -313,139 +302,10 @@ def format_aws_error(
     return f"{name}: {msg}"
 
 
-def _json_default(obj: Any) -> Any:
-    if isinstance(obj, Decimal):
-        return float(obj)
-    return str(obj)
-
-
 def format_yyyymm(yyyymm: str) -> str:
     if len(yyyymm) == 6 and yyyymm.isdigit():
         return f"{yyyymm[:4]}년 {int(yyyymm[4:6])}월"
     return yyyymm
-
-
-def parse_month(text: str) -> str | None:
-    m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월", text)
-    if m:
-        return f"{m.group(1)}{int(m.group(2)):02d}"
-    m = re.search(r"\b(20\d{4})\b", text)
-    if m:
-        return m.group(1)
-    return None
-
-
-def has_summary_intent(text: str) -> bool:
-    return any(k in text for k in ("요약", "정리", "분석", "리포트", "summary"))
-
-
-def has_table_reference(text: str, api_table: str | None = None) -> bool:
-    if api_table and api_table.strip():
-        return True
-    if TABLE_NAME in text:
-        return True
-    return any(kw in text for kw in TABLE_QUERY_KEYWORDS)
-
-
-def is_summary_request(text: str, api_table: str | None = None) -> bool:
-    """요약 의도이며 테이블명·기준년월이 모두 있는 경우."""
-    return (
-        has_summary_intent(text)
-        and has_table_reference(text, api_table)
-        and bool(parse_month(text))
-    )
-
-
-def _numeric(val: Any) -> float:
-    if val is None:
-        return 0.0
-    if isinstance(val, Decimal):
-        return float(val)
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def build_chart_specs(
-    rows: list[dict[str, Any]],
-    *,
-    month: str,
-    table: str,
-) -> list[dict[str, Any]]:
-    """요약 응답용 Chart.js 막대그래프 스펙 (고객수비율·고객수)."""
-    if not rows:
-        return []
-
-    sorted_rows = sorted(
-        rows,
-        key=lambda r: (
-            str(r.get("계열사그룹구분") or ""),
-            str(r.get("계열사등급구분내용") or ""),
-        ),
-    )
-    labels = [
-        f"{r.get('계열사그룹구분')}-등급{r.get('계열사등급구분내용')}"
-        for r in sorted_rows
-    ]
-    ratio_data = [_numeric(r.get("고객수비율")) for r in sorted_rows]
-    count_data = [_numeric(r.get("고객수")) for r in sorted_rows]
-    month_label = format_yyyymm(month)
-
-    return [
-        {
-            "type": "bar",
-            "title": f"{table} · 고객수비율 (%) — {month_label}",
-            "labels": labels,
-            "datasets": [
-                {
-                    "label": "고객수비율 (%)",
-                    "data": ratio_data,
-                    "backgroundColor": "rgba(124, 58, 237, 0.78)",
-                    "borderColor": "rgba(109, 40, 217, 1)",
-                    "borderWidth": 1,
-                }
-            ],
-        },
-        {
-            "type": "bar",
-            "title": f"{table} · 고객수 — {month_label}",
-            "labels": labels,
-            "datasets": [
-                {
-                    "label": "고객수",
-                    "data": count_data,
-                    "backgroundColor": "rgba(16, 185, 129, 0.78)",
-                    "borderColor": "rgba(5, 150, 105, 1)",
-                    "borderWidth": 1,
-                }
-            ],
-        },
-    ]
-
-
-def fetch_table_rows(table_name: str, yyyymm: str) -> list[dict[str, Any]]:
-    sql = f"""
-        SELECT
-          "그룹회사코드", "기준년월", "계열사그룹구분", "계열사등급구분내용",
-          "고객수", "고객수비율", "고객수증감비율",
-          "합계계열사등급환산점수", "합계계열사등급환산점수증감비율",
-          "합계계열사자체점수", "합계계열사자체점수증감비율",
-          "최소계열사등급환산점수", "최대계열사등급환산점수",
-          "최소계열사자체점수", "최대계열사자체점수",
-          "시스템최초등록일시", "시스템최종처리일시", "시스템최종사용자번호"
-        FROM public."{table_name}"
-        WHERE "기준년월" = %s
-        ORDER BY "계열사그룹구분", "계열사등급구분내용"
-    """
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (yyyymm,))
-            cols = [d[0] for d in cur.description]
-            return [
-                {c: (float(v) if isinstance(v, Decimal) else v) for c, v in zip(cols, row)}
-                for row in cur.fetchall()
-            ]
 
 
 def ask_bedrock(system: str, messages: list[dict], max_tokens: int = 2048) -> str:
@@ -539,91 +399,180 @@ def ask_bedrock(system: str, messages: list[dict], max_tokens: int = 2048) -> st
 # --- LangGraph nodes ---
 
 
-def parse_node(state: CultureState) -> dict[str, Any]:
+def analyze_question_node(state: CultureState) -> dict[str, Any]:
+    """질문 분석 에이전트 — INST1 추출 vs 테이블 추천 vs 일반 대화."""
     msg = state.get("user_message", "")
-    api_table = (state.get("table_name") or "").strip()
-    month = parse_month(msg) or ""
-    has_table = has_table_reference(msg, api_table or None)
-    wants_summary = has_summary_intent(msg)
+    analysis = analyze_question(
+        msg,
+        bedrock_ask=ask_bedrock,
+        pending_aggregate=state.get("pending_aggregate") or None,
+        pending_chart=state.get("pending_chart") or None,
+    )
+    return {"question_analysis": analysis}
 
-    if wants_summary and (not has_table or not month):
-        return {
-            "table_name": api_table or TABLE_NAME,
-            "month": month,
-            "is_summary_request": False,
-            "needs_input": True,
-            "summary": GUIDE_MISSING_INPUT,
-            "reply": GUIDE_MISSING_INPUT,
-        }
 
+def table_prompt_node(state: CultureState) -> dict[str, Any]:
+    """테이블명만 언급된 경우 추천 질문 응답."""
+    analysis = state.get("question_analysis") or {}
+    text = format_inst1_table_prompt_reply(analysis)
+    return {"summary": text, "reply": text}
+
+
+def aggregate_prompt_node(state: CultureState) -> dict[str, Any]:
+    """집계 컬럼 선택 안내 에이전트."""
+    analysis = state.get("question_analysis") or {}
+    text = format_inst1_aggregate_prompt_reply(analysis)
+    table = (analysis.get("tables") or [None])[0]
+    korean = analysis.get("table_korean") or ""
+    pending: dict[str, Any] = {}
+    if table:
+        pending = {"table": table, "korean": korean}
+    return {"summary": text, "reply": text, "pending_aggregate": pending}
+
+
+def column_desc_node(state: CultureState) -> dict[str, Any]:
+    """테이블 컬럼 설명 에이전트."""
+    analysis = state.get("question_analysis") or {}
+    try:
+        text = explain_inst1_columns(analysis)
+    except Exception as e:
+        return {"error": str(e)}
+    return {"summary": text, "reply": text}
+
+
+def chart_node(state: CultureState) -> dict[str, Any]:
+    """집계 데이터 막대 차트 에이전트."""
+    analysis = state.get("question_analysis") or {}
+    pending = state.get("pending_chart") or {}
+    try:
+        specs = build_aggregate_chart_specs(pending)
+        if not specs:
+            raise ValueError(
+                "차트로 그릴 집계 데이터가 없습니다. 먼저 집계 데이터를 조회해 주세요."
+            )
+        text = format_chart_agent_reply(analysis, pending, specs)
+    except Exception as e:
+        return {"error": str(e)}
+    display = pending.get("display_label") or "집계 데이터"
+    report_export = build_report_export(
+        agent="inst1_chart",
+        content=text,
+        table_label=display,
+        month=str(pending.get("month") or ""),
+        chart_specs=specs,
+    )
     return {
-        "table_name": api_table or TABLE_NAME,
-        "month": month,
-        "is_summary_request": wants_summary and has_table and bool(month),
-        "needs_input": False,
+        "summary": text,
+        "reply": text,
+        "chart_specs": specs,
+        "excel_export": {},
+        "report_export": report_export,
+        "pending_chart": {},
     }
 
 
-def fetch_node(state: CultureState) -> dict[str, Any]:
-    table = state.get("table_name") or TABLE_NAME
-    month = state.get("month", "")
-    if not month:
-        return {"error": "기준년월을 찾을 수 없습니다. 예: 2026년 4월"}
-    rows = fetch_table_rows(table, month)
-    if not rows:
+def data_summary_node(state: CultureState) -> dict[str, Any]:
+    """테이블 데이터 요약 에이전트."""
+    analysis = state.get("question_analysis") or {}
+    try:
+        text = summarize_inst1_table_data(analysis, bedrock_ask=ask_bedrock)
+        table = (analysis.get("tables") or [None])[0] or ""
+        table_label = (
+            analysis.get("table_korean")
+            or INST1_TABLE_KOREAN_NAMES.get(table, table)
+            or "데이터 요약"
+        )
+        report_export = build_report_export(
+            agent="inst1_data_summary",
+            content=text,
+            table_label=table_label,
+            month=str(analysis.get("month") or ""),
+        )
+    except Exception as e:
+        return {"error": str(e)}
+    return {"summary": text, "reply": text, "report_export": report_export}
+
+
+def fetch_inst1_node(state: CultureState) -> dict[str, Any]:
+    """TSHDEOA01·TSHDEOA02 데이터 추출 전용 에이전트."""
+    analysis = state.get("question_analysis") or {}
+    try:
+        result = extract_inst1_data(analysis)
+    except Exception as e:
+        return {"error": str(e)}
+    if result.get("errors") and result.get("total_rows", 0) == 0:
         return {
-            "error": (
-                f'{table} 테이블에 기준년월 {month}({format_yyyymm(month)}) '
-                "데이터가 없습니다."
-            )
+            "error": "; ".join(result["errors"]),
+            "inst1_data": result.get("inst1_data") or {},
+            "inst1_column_orders": result.get("inst1_column_orders") or {},
+            "inst1_result_labels": result.get("inst1_result_labels") or {},
+            "inst1_queries": result.get("inst1_queries") or {},
         }
-    return {"raw_data": rows}
+    return {
+        "inst1_data": result.get("inst1_data") or {},
+        "inst1_column_orders": result.get("inst1_column_orders") or {},
+        "inst1_result_labels": result.get("inst1_result_labels") or {},
+        "inst1_queries": result.get("inst1_queries") or {},
+        "month": result.get("month", ""),
+        "extract_tables": list((result.get("inst1_data") or {}).keys()),
+        "notice": "; ".join(result.get("errors") or []) or "",
+    }
 
 
-def summarize_node(state: CultureState) -> dict[str, Any]:
+def format_inst1_node(state: CultureState) -> dict[str, Any]:
     if state.get("error"):
         return {}
-    rows = state.get("raw_data") or []
-    month = state.get("month", "")
-    table = state.get("table_name") or TABLE_NAME
-    user_message = state.get("user_message", "")
-    data_json = json.dumps(rows, ensure_ascii=False, indent=2, default=_json_default)
-    prompt = (
-        f"테이블: {table}\n"
-        f"기준년월: {month} ({format_yyyymm(month)})\n"
-        f"조회 건수: {len(rows)}건\n\n"
-        f"데이터(JSON):\n{data_json}\n\n"
-        f"사용자 요청: {user_message}\n\n"
-        "위 데이터의 수치·비중·특이점을 한국어로 요약하세요."
-    )
-    summary = ask_bedrock(SUMMARY_SYSTEM_PROMPT, [{"role": "user", "content": prompt}], 2048)
-    charts = build_chart_specs(rows, month=month, table=table)
-    return {"summary": summary, "chart_specs": charts}
+    analysis = state.get("question_analysis") or {}
+    extract_result = {
+        "inst1_data": state.get("inst1_data") or {},
+        "inst1_result_labels": state.get("inst1_result_labels") or {},
+        "inst1_queries": state.get("inst1_queries") or {},
+        "month": state.get("month") or analysis.get("month"),
+        "group_company": analysis.get("group_company"),
+        "customer_id": analysis.get("customer_id"),
+        "errors": [state["error"]] if state.get("error") else [],
+        "total_rows": sum(len(v) for v in (state.get("inst1_data") or {}).values()),
+    }
+    text = format_inst1_reply(analysis, extract_result)
+    out: dict[str, Any] = {"summary": text, "reply": text}
+    if analysis.get("query_type") == "aggregate":
+        out["pending_aggregate"] = {}
+    pending_chart = build_pending_chart_payload(analysis, extract_result)
+    if pending_chart:
+        out["pending_chart"] = pending_chart
+        out["follow_up_questions"] = [AGGREGATE_CHART_FOLLOW_UP]
+    if analysis.get("intent") == "inst1_extract" and extract_result.get("total_rows", 0) > 0:
+        excel_export = build_inst1_excel_export(extract_result, analysis)
+        if excel_export:
+            out["excel_export"] = excel_export
+    return out
 
 
-def export_pdf_node(state: CultureState) -> dict[str, Any]:
-    """요약 응답을 PDF로 만들어 S3에 저장."""
-    if state.get("error") or state.get("needs_input"):
-        return {}
-    if not state.get("is_summary_request"):
-        return {}
-    summary = (state.get("summary") or "").strip()
-    if not summary:
-        return {}
-    try:
-        from culture_pdf_s3 import upload_summary_pdf
-
-        url = upload_summary_pdf(
-            summary=summary,
-            table=state.get("table_name") or TABLE_NAME,
-            month=state.get("month") or "",
-            chart_specs=state.get("chart_specs") or [],
-        )
-        return {"pdf_url": url}
-    except Exception as e:
-        prev = (state.get("notice") or "").strip()
-        msg = f"PDF S3 저장 실패: {e}"
-        return {"notice": f"{prev}\n{msg}".strip() if prev else msg}
+def route_after_analyze(
+    state: CultureState,
+) -> Literal[
+    "fetch_inst1",
+    "general",
+    "table_prompt",
+    "aggregate_prompt",
+    "column_desc",
+    "data_summary",
+    "chart",
+]:
+    analysis = state.get("question_analysis") or {}
+    if analysis.get("intent") == "inst1_table_prompt":
+        return "table_prompt"
+    if analysis.get("intent") == "inst1_aggregate_prompt":
+        return "aggregate_prompt"
+    if analysis.get("intent") == "inst1_column_desc":
+        return "column_desc"
+    if analysis.get("intent") == "inst1_data_summary":
+        return "data_summary"
+    if analysis.get("intent") == "inst1_chart":
+        return "chart"
+    if analysis.get("intent") == "inst1_extract":
+        return "fetch_inst1"
+    return "general"
 
 
 def general_chat_node(state: CultureState) -> dict[str, Any]:
@@ -632,56 +581,93 @@ def general_chat_node(state: CultureState) -> dict[str, Any]:
     if not history or history[-1].get("content") != msg:
         history.append({"role": "user", "content": msg})
     text = ask_bedrock(GENERAL_SYSTEM_PROMPT, history, 1024)
+    analysis = state.get("question_analysis") or {
+        "intent": "general_chat",
+        "reason": "일반 대화로 분류",
+    }
+    text = with_agent_banner(text, analysis)
     return {"summary": text, "reply": text}
 
 
 def reply_node(state: CultureState) -> dict[str, Any]:
     if state.get("error"):
         err = state["error"]
+        analysis = state.get("question_analysis") or {}
+        if analysis.get("intent"):
+            err_text = with_agent_banner(f"(처리 실패: {err})", analysis)
+            return {"reply": err_text, "summary": ""}
         return {"reply": f"(처리 실패: {err})", "summary": ""}
     preset = (state.get("reply") or "").strip()
-    if state.get("needs_input") and preset:
-        return {"reply": preset, "summary": preset, "notice": ""}
     summary = (state.get("summary") or "").strip()
     charts = list(state.get("chart_specs") or [])
+    excel_export = dict(state.get("excel_export") or {})
+    report_export = dict(state.get("report_export") or {})
+    follow_up = list(state.get("follow_up_questions") or [])
+    if preset:
+        return {
+            "reply": preset,
+            "summary": summary or preset,
+            "notice": (state.get("notice") or "").strip(),
+            "chart_specs": charts,
+            "excel_export": excel_export,
+            "report_export": report_export,
+            "follow_up_questions": follow_up,
+        }
     if not summary:
-        return {"reply": "(요약 결과가 비어 있습니다.)", "summary": "", "chart_specs": charts}
-    pdf_url = (state.get("pdf_url") or "").strip()
+        return {
+            "reply": "(응답이 비어 있습니다.)",
+            "summary": "",
+            "notice": "",
+            "chart_specs": charts,
+            "excel_export": excel_export,
+            "report_export": report_export,
+            "follow_up_questions": follow_up,
+        }
     return {
         "reply": summary,
         "summary": summary,
-        "chart_specs": charts,
-        "pdf_url": pdf_url,
         "notice": (state.get("notice") or "").strip(),
+        "chart_specs": charts,
+        "excel_export": excel_export,
+        "report_export": report_export,
+        "follow_up_questions": follow_up,
     }
-
-
-def route_after_parse(state: CultureState) -> Literal["fetch", "general", "reply"]:
-    if state.get("needs_input"):
-        return "reply"
-    if state.get("is_summary_request"):
-        return "fetch"
-    return "general"
 
 
 def build_culture_graph():
     graph = StateGraph(CultureState)
-    graph.add_node("parse", parse_node)
-    graph.add_node("fetch", fetch_node)
-    graph.add_node("summarize", summarize_node)
-    graph.add_node("export_pdf", export_pdf_node)
+    graph.add_node("analyze", analyze_question_node)
+    graph.add_node("table_prompt", table_prompt_node)
+    graph.add_node("aggregate_prompt", aggregate_prompt_node)
+    graph.add_node("column_desc", column_desc_node)
+    graph.add_node("data_summary", data_summary_node)
+    graph.add_node("chart", chart_node)
+    graph.add_node("fetch_inst1", fetch_inst1_node)
+    graph.add_node("format_inst1", format_inst1_node)
     graph.add_node("general", general_chat_node)
     graph.add_node("reply", reply_node)
 
-    graph.add_edge(START, "parse")
+    graph.add_edge(START, "analyze")
     graph.add_conditional_edges(
-        "parse",
-        route_after_parse,
-        {"fetch": "fetch", "general": "general", "reply": "reply"},
+        "analyze",
+        route_after_analyze,
+        {
+            "fetch_inst1": "fetch_inst1",
+            "general": "general",
+            "table_prompt": "table_prompt",
+            "aggregate_prompt": "aggregate_prompt",
+            "column_desc": "column_desc",
+            "data_summary": "data_summary",
+            "chart": "chart",
+        },
     )
-    graph.add_edge("fetch", "summarize")
-    graph.add_edge("summarize", "export_pdf")
-    graph.add_edge("export_pdf", "reply")
+    graph.add_edge("table_prompt", "reply")
+    graph.add_edge("aggregate_prompt", "reply")
+    graph.add_edge("column_desc", "reply")
+    graph.add_edge("data_summary", "reply")
+    graph.add_edge("chart", "reply")
+    graph.add_edge("fetch_inst1", "format_inst1")
+    graph.add_edge("format_inst1", "reply")
     graph.add_edge("general", "reply")
     graph.add_edge("reply", END)
     return graph
@@ -700,25 +686,36 @@ def reset_executor() -> None:
     _graph_executor = None
 
 
+reset_executor()
+
+
 def run_workflow(
     user_message: str,
     *,
     table_name: str | None = None,
     history: list[dict[str, str]] | None = None,
+    pending_aggregate: dict[str, Any] | None = None,
+    pending_chart: dict[str, Any] | None = None,
 ) -> CultureState:
     """워크플로우 전체 실행 → 최종 State 반환."""
     initial: CultureState = {
         "user_message": user_message,
         "table_name": (table_name or "").strip(),
         "history": history or [],
-        "raw_data": [],
         "summary": "",
         "reply": "",
-        "chart_specs": [],
-        "pdf_url": "",
         "notice": "",
         "error": "",
-        "needs_input": False,
+        "question_analysis": {},
+        "inst1_data": {},
+        "inst1_queries": {},
+        "extract_tables": [],
+        "pending_aggregate": pending_aggregate or {},
+        "pending_chart": pending_chart or {},
+        "chart_specs": [],
+        "excel_export": {},
+        "report_export": {},
+        "follow_up_questions": [],
     }
     try:
         return get_executor().invoke(initial)

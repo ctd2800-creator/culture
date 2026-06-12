@@ -3,6 +3,9 @@
 .env.local
 supabase/.env.local
 
+exports/
+reports/
+
 __pycache__/
 *.py[cod]
 *.pyc

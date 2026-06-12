@@ -340,3 +340,39 @@ def upload_summary_pdf(
         Params={"Bucket": bucket, "Key": key},
         ExpiresIn=_presigned_expires(),
     )
+
+
+REPORT_DIR = Path(__file__).resolve().parent / "reports"
+
+
+def ascii_report_filename(prefix: str = "culture_report") -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", (prefix or "culture_report").strip()) or "culture_report"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{safe}_{ts}.pdf"
+
+
+def report_has_data(report: dict[str, Any]) -> bool:
+    return bool((report.get("content") or report.get("summary") or "").strip())
+
+
+def save_report_to_disk(content: bytes, filename: str) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.pdf"
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    path = REPORT_DIR / name
+    path.write_bytes(content)
+    return path.resolve()
+
+
+def build_agent_report_pdf_bytes(report: dict[str, Any]) -> bytes:
+    """차트·요약 에이전트 응답 → PDF bytes."""
+    content = (report.get("content") or report.get("summary") or "").strip()
+    if not content:
+        raise ValueError("보고서 내용이 비어 있습니다.")
+    return build_summary_pdf_bytes(
+        summary=content,
+        table=str(report.get("table_label") or report.get("table") or "보고서"),
+        month=str(report.get("month") or ""),
+        chart_specs=list(report.get("chart_specs") or []),
+    )
