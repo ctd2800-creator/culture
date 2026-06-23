@@ -201,8 +201,8 @@ def _render_chart_png(spec: dict[str, Any]) -> bytes:
         labels, values = labels[:n], values[:n]
 
     ds0 = datasets[0]
-    bar_color = _rgba_to_mpl(str(ds0.get("backgroundColor") or ""), "#7c3aed")
-    edge_color = _rgba_to_mpl(str(ds0.get("borderColor") or ""), "#6d28d9")
+    bar_color = _rgba_to_mpl(str(ds0.get("backgroundColor") or ""), "#FFCC00")
+    edge_color = _rgba_to_mpl(str(ds0.get("borderColor") or ""), "#5C4B3C")
     y_label = str(ds0.get("label") or "값")
     title = str(spec.get("title") or "막대그래프")
 
@@ -355,7 +355,10 @@ def report_has_data(report: dict[str, Any]) -> bool:
     return bool((report.get("content") or report.get("summary") or "").strip())
 
 
-def save_report_to_disk(content: bytes, filename: str) -> Path:
+def save_report_to_disk(content: bytes, filename: str) -> Path | None:
+    """로컬 PC culture/reports에 PDF 저장. Vercel 등 읽기 전용 FS에서는 None."""
+    if os.environ.get("VERCEL"):
+        return None
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.pdf"
     if not name.lower().endswith(".pdf"):

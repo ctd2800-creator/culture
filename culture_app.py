@@ -40,6 +40,13 @@ try:
 except ImportError:
     pass
 
+from culture_inst1_agents import (
+    build_aggregate_chart_specs,
+    build_workflow_status_event,
+    format_chart_agent_reply,
+    mask_excel_export_for_display,
+    mask_inst1_data_for_display,
+)
 from culture_excel import build_excel_bytes, export_has_data, save_excel_to_disk
 from culture_pdf_s3 import (
     build_agent_report_pdf_bytes,
@@ -66,6 +73,7 @@ from supabase.table_config import (
 )
 from supabase.tshdeoa01_setup import ensure_tshdeoa01_table
 from supabase.tshdeoa02_setup import ensure_tshdeoa02_table
+from supabase.tshdeoa04_setup import ensure_tshdeoa04_table
 from supabase.tshde0zcd_setup import ensure_tshde0zcd_table
 
 PUBLIC_ENDPOINTS = frozenset(
@@ -83,6 +91,7 @@ _tchdhc001_initialized = False
 _members_initialized = False
 _tshdeoa01_initialized = False
 _tshdeoa02_initialized = False
+_tshdeoa04_initialized = False
 _tshde0zcd_initialized = False
 APP_BOOT_ID = uuid.uuid4().hex
 
@@ -176,7 +185,7 @@ def require_login():
 @app.before_request
 def ensure_supabase_tables_ready():
     global _tchdhc001_initialized, _members_initialized
-    global _tshdeoa01_initialized, _tshdeoa02_initialized, _tshde0zcd_initialized
+    global _tshdeoa01_initialized, _tshdeoa02_initialized, _tshdeoa04_initialized, _tshde0zcd_initialized
     if request.endpoint in ("api_health", "static_files"):
         return
     if request.endpoint == "index" and request.method == "GET" and not is_logged_in():
@@ -192,6 +201,7 @@ def ensure_supabase_tables_ready():
         and _members_initialized
         and _tshdeoa01_initialized
         and _tshdeoa02_initialized
+        and _tshdeoa04_initialized
         and _tshde0zcd_initialized
     ):
         return
@@ -201,6 +211,7 @@ def ensure_supabase_tables_ready():
             and _members_initialized
             and _tshdeoa01_initialized
             and _tshdeoa02_initialized
+            and _tshdeoa04_initialized
             and _tshde0zcd_initialized
         ):
             return
@@ -218,6 +229,9 @@ def ensure_supabase_tables_ready():
                 if not _tshdeoa02_initialized:
                     ensure_tshdeoa02_table(conn)
                     _tshdeoa02_initialized = True
+                if not _tshdeoa04_initialized:
+                    ensure_tshdeoa04_table(conn)
+                    _tshdeoa04_initialized = True
                 if not _tshde0zcd_initialized:
                     ensure_tshde0zcd_table(conn)
                     _tshde0zcd_initialized = True
@@ -279,6 +293,17 @@ def _sse_pad() -> str:
     return ":" + (" " * 2048) + "\n\n"
 
 
+def _chart_available_from_final(final: dict[str, Any]) -> bool:
+    return bool(final.get("chart_available"))
+
+
+def _client_report_export(report: dict[str, Any]) -> dict[str, Any]:
+    """UI 보고서 버튼 — 데이터 요약 에이전트 결과만 노출."""
+    if (report.get("agent") or "") == "inst1_data_summary":
+        return dict(report)
+    return {}
+
+
 def run_chat(
     raw: str,
     history: list[dict],
@@ -296,6 +321,10 @@ def run_chat(
     list[str],
     dict[str, Any],
     dict[str, Any],
+    bool,
+    list[str],
+    str,
+    str,
 ]:
     """LangGraph Executor로 질문 분석 → INST1 추출/일반 대화 → 응답 실행."""
     final = run_workflow(
@@ -313,13 +342,19 @@ def run_chat(
     notice = final.get("notice") or None
     charts = list(final.get("chart_specs") or [])
     pdf_url = (final.get("pdf_url") or "").strip()
-    inst1_data = dict(final.get("inst1_data") or {})
+    inst1_data = mask_inst1_data_for_display(dict(final.get("inst1_data") or {}))
     inst1_column_orders = dict(final.get("inst1_column_orders") or {})
     inst1_result_labels = dict(final.get("inst1_result_labels") or {})
     inst1_queries = dict(final.get("inst1_queries") or {})
     follow_up_questions = list(final.get("follow_up_questions") or [])
-    excel_export = dict(final.get("excel_export") or {})
-    report_export = dict(final.get("report_export") or {})
+    aggregate_column_options = list(final.get("aggregate_column_options") or [])
+    aggregate_column_label = (final.get("aggregate_column_label") or "").strip()
+    aggregate_column_pick_mode = (
+        final.get("aggregate_column_pick_mode") or "append"
+    ).strip()
+    excel_export = mask_excel_export_for_display(dict(final.get("excel_export") or {}))
+    report_export = _client_report_export(dict(final.get("report_export") or {}))
+    chart_available = _chart_available_from_final(final)
     return (
         reply,
         notice,
@@ -332,6 +367,10 @@ def run_chat(
         follow_up_questions,
         excel_export,
         report_export,
+        chart_available,
+        aggregate_column_options,
+        aggregate_column_label,
+        aggregate_column_pick_mode,
     )
 
 
@@ -346,53 +385,71 @@ LOGIN_PAGE = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#7c3aed" />
+  <meta name="theme-color" content="#FFCC00" />
   <title>KB AI 데이터 리터러시 — 로그인</title>
   <style>
+    :root {
+      --kb-yellow: #ffcc00;
+      --kb-yellow-dark: #e6b800;
+      --kb-yellow-light: #fff8e1;
+      --kb-brown: #5c4b3c;
+      --kb-brown-dark: #3d3228;
+      --kb-brown-darker: #2c2419;
+      --kb-text: #111111;
+      --kb-text-muted: #4a4038;
+      --kb-border: #d9cbb8;
+      --kb-bg: #ffffff;
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100dvh;
       font-family: system-ui, -apple-system, 'Malgun Gothic', 'Noto Sans KR', sans-serif;
-      background: linear-gradient(160deg, #f5f3ff 0%, #ede9fe 40%, #f0f4f8 100%);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      background: linear-gradient(165deg, #fff8e1 0%, #faf7f2 45%, #f3ebe0 100%);
       display: flex;
       align-items: center;
       justify-content: center;
       padding: 24px;
+      color: var(--kb-text);
     }
     .card {
       width: 100%;
       max-width: 400px;
       background: #fff;
       border-radius: 16px;
-      box-shadow: 0 4px 24px rgba(124, 58, 237, 0.15);
+      border: 1px solid var(--kb-border);
+      box-shadow: 0 8px 32px rgba(44, 36, 25, 0.1);
       padding: 28px 24px;
     }
-    h1 { margin: 0 0 6px; font-size: 1.4rem; color: #5b21b6; }
-    .sub { color: #64748b; font-size: 14px; margin: 0 0 20px; }
-    label { display: block; font-size: 14px; font-weight: 600; color: #334155; margin-bottom: 6px; }
+    h1 { margin: 0 0 6px; font-size: 1.5rem; font-weight: 800; color: var(--kb-brown-darker); }
+    .sub { color: var(--kb-text-muted); font-size: 15px; margin: 0 0 20px; }
+    label { display: block; font-size: 15px; font-weight: 700; color: var(--kb-brown-darker); margin-bottom: 6px; }
     input {
       width: 100%;
       padding: 12px 14px;
-      border: 1px solid #cbd5e1;
+      border: 1px solid var(--kb-border);
       border-radius: 10px;
       font-size: 16px;
       margin-bottom: 14px;
+      background: #fff;
     }
-    input:focus { outline: 2px solid #a78bfa; border-color: #7c3aed; }
+    input:focus { outline: 2px solid rgba(255, 204, 0, 0.55); border-color: var(--kb-yellow); }
     button {
       width: 100%;
       border: 0;
       padding: 14px;
       border-radius: 12px;
-      background: #7c3aed;
-      color: #fff;
+      background: var(--kb-yellow);
+      color: var(--kb-brown-darker);
       font-size: 16px;
-      font-weight: 600;
+      font-weight: 700;
       cursor: pointer;
       margin-top: 4px;
     }
-    button:active { background: #5b21b6; }
+    button:active { background: var(--kb-yellow-dark); }
     .error {
       background: #fee2e2;
       color: #991b1b;
@@ -402,7 +459,7 @@ LOGIN_PAGE = """
       font-size: 14px;
       margin-bottom: 14px;
     }
-    .hint { font-size: 12px; color: #94a3b8; margin-top: 16px; line-height: 1.5; }
+    .hint { font-size: 13px; color: var(--kb-text-muted); margin-top: 16px; line-height: 1.55; }
   </style>
 </head>
 <body>
@@ -432,268 +489,404 @@ PAGE = """
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover" />
-  <meta name="theme-color" content="#7c3aed" />
-  <meta name="mobile-web-app-capable" content="yes" />
-  <meta name="format-detection" content="telephone=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#FFCC00" />
   <title>KB AI 데이터 리터러시</title>
   <style>
-    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    html {
-      -webkit-text-size-adjust: 100%;
-      text-size-adjust: 100%;
+    :root {
+      --kb-yellow: #ffcc00;
+      --kb-yellow-dark: #e6b800;
+      --kb-yellow-light: #fff8e1;
+      --kb-yellow-soft: #fff6d6;
+      --kb-brown: #5c4b3c;
+      --kb-brown-dark: #3d3228;
+      --kb-brown-darker: #2c2419;
+      --kb-text: #111111;
+      --kb-text-secondary: #3d3228;
+      --kb-text-muted: #4a4038;
+      --kb-border: #d9cbb8;
+      --kb-bg: #f7f3ec;
+      --kb-sidebar-text: #ffffff;
     }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
       font-family: system-ui, -apple-system, 'Segoe UI', 'Malgun Gothic', 'Noto Sans KR', sans-serif;
-      background: linear-gradient(160deg, #f5f3ff 0%, #ede9fe 40%, #f0f4f8 100%);
-      min-height: 100dvh;
-      min-height: 100vh;
-      padding: max(12px, env(safe-area-inset-top, 0px))
-               max(12px, env(safe-area-inset-right, 0px))
-               max(12px, env(safe-area-inset-bottom, 0px))
-               max(12px, env(safe-area-inset-left, 0px));
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      background: var(--kb-bg);
+      color: var(--kb-text);
+      overflow: hidden;
     }
-    .page-wrap {
-      max-width: 720px;
-      margin: 0 auto;
+    .app-shell {
+      display: flex;
+      height: 100vh;
+      min-width: 960px;
+    }
+    .sidebar {
+      width: 300px;
+      flex-shrink: 0;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      min-height: calc(100dvh - 24px);
-      min-height: calc(100vh - 24px);
+      background: linear-gradient(180deg, var(--kb-brown-darker) 0%, var(--kb-brown-dark) 100%);
+      color: var(--kb-sidebar-text);
+      border-right: 1px solid #4a3f34;
     }
-    .banner {
-      padding: 12px 14px;
-      border-radius: 12px;
+    .sidebar-brand {
+      padding: 22px 20px 16px;
+      border-bottom: 1px solid rgba(255, 204, 0, 0.2);
+    }
+    .sidebar-brand h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: var(--kb-yellow);
+      letter-spacing: -0.02em;
+      line-height: 1.4;
+    }
+    .sidebar-brand p {
+      margin: 8px 0 0;
+      font-size: 14px;
+      color: #f2ebe2;
+      line-height: 1.5;
+    }
+    .sidebar-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 16px 12px;
+    }
+    .sidebar-section {
+      margin-bottom: 18px;
+    }
+    .sidebar-section-title {
+      margin: 0 0 10px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--kb-yellow);
+    }
+    .prompt-chip {
+      margin: 0;
+      padding: 11px 13px;
+      background: rgba(255, 204, 0, 0.12);
+      border: 1px solid rgba(255, 204, 0, 0.3);
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.55;
+      color: #ffffff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .prompt-chip:hover {
+      background: rgba(255, 204, 0, 0.16);
+      border-color: rgba(255, 204, 0, 0.45);
+    }
+    .prompt-chip + .prompt-chip { margin-top: 8px; }
+    .table-chip {
+      margin: 0;
+      padding: 9px 13px;
+      background: rgba(0, 0, 0, 0.22);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #ffffff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .table-chip:hover {
+      background: rgba(255, 204, 0, 0.12);
+      border-color: rgba(255, 204, 0, 0.35);
+    }
+    .table-chip + .table-chip { margin-top: 6px; }
+    .sidebar-footer {
+      padding: 14px 16px 18px;
+      border-top: 1px solid rgba(255, 204, 0, 0.15);
+      background: rgba(0, 0, 0, 0.15);
+    }
+    .member-card {
       font-size: 14px;
       line-height: 1.55;
-      word-break: keep-all;
-      overflow-wrap: break-word;
+      color: var(--kb-sidebar-text);
+    }
+    .member-card strong {
+      display: block;
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    .member-card .meta {
+      display: block;
+      color: #e8ddd0;
+      font-size: 13px;
+    }
+    .member-card .logout {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 8px 13px;
+      border-radius: 8px;
+      background: rgba(255, 204, 0, 0.2);
+      color: var(--kb-yellow);
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .member-card .logout:hover { background: rgba(255, 204, 0, 0.25); }
+    .main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--kb-bg);
+    }
+    .main-alerts {
+      flex-shrink: 0;
+      padding: 6px 12px 0;
+    }
+    .banner {
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.55;
+      margin-bottom: 8px;
     }
     .banner-warn { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
     .banner-err { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
-    .panel {
+    .chat-panel {
       flex: 1;
+      min-height: 0;
       display: flex;
       flex-direction: column;
+      margin: 4px 10px 6px;
       background: #fff;
-      border-radius: 16px;
-      box-shadow: 0 4px 24px rgba(124, 58, 237, 0.12);
-      padding: 16px;
-      min-height: 0;
-    }
-    .panel-header { flex-shrink: 0; }
-    h1 {
-      margin: 0 0 4px;
-      font-size: clamp(1.15rem, 4.5vw, 1.35rem);
-      color: #5b21b6;
-      letter-spacing: -0.02em;
-    }
-    .sub {
-      color: #64748b;
-      font-size: clamp(13px, 3.6vw, 14px);
-      margin: 0;
-      line-height: 1.55;
-      word-break: keep-all;
-      overflow-wrap: anywhere;
-    }
-    .sub em { font-style: normal; color: #475569; }
-    .suggested-prompts {
-      margin-top: 10px;
-      padding: 10px 12px;
-      background: #f5f3ff;
-      border: 1px solid #ddd6fe;
-      border-radius: 10px;
-      font-size: 13px;
-      color: #4c1d95;
-      line-height: 1.55;
-      word-break: keep-all;
-      overflow-wrap: anywhere;
-    }
-    .suggested-prompts .suggested-label {
-      margin: 0 0 8px;
-      font-size: 13px;
-      font-weight: 700;
-      color: #5b21b6;
-    }
-    .suggested-prompts .suggested-item {
-      margin: 0;
-      color: #475569;
-      font-size: clamp(13px, 3.6vw, 14px);
-    }
-    .suggested-prompts .suggested-item + .suggested-item {
-      margin-top: 6px;
-    }
-    .inst1-tables {
-      margin-top: 8px;
+      border: 1px solid var(--kb-border);
+      border-radius: 14px;
+      box-shadow: 0 6px 24px rgba(44, 36, 25, 0.05);
+      overflow: hidden;
     }
     .chat-box {
       flex: 1;
-      min-height: 200px;
-      max-height: none;
+      min-height: 0;
       overflow-y: auto;
-      overflow-x: hidden;
-      -webkit-overflow-scrolling: touch;
-      overscroll-behavior: contain;
-      border: 1px solid #e2e8f0;
-      border-radius: 12px;
-      padding: 10px;
-      margin: 12px 0 0;
-      background: #fafafa;
-      scroll-padding-bottom: 12px;
-    }
-    .msg {
-      padding: 12px 14px;
-      border-radius: 14px;
-      margin-bottom: 10px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      overflow-wrap: anywhere;
-      line-height: 1.6;
-      font-size: 16px;
-      max-width: 100%;
-    }
-    .msg.user {
-      background: #ede9fe;
-      margin-left: clamp(0px, 4vw, 20px);
-      border-bottom-right-radius: 4px;
-    }
-    .msg.assistant {
-      background: #f0fdf4;
-      border: 1px solid #bbf7d0;
-      margin-right: clamp(0px, 4vw, 20px);
-      border-bottom-left-radius: 4px;
+      padding: 20px 22px;
+      background: #ffffff;
     }
     .composer {
       flex-shrink: 0;
-      padding-top: 8px;
-      padding-bottom: max(4px, env(safe-area-inset-bottom, 0px));
+      padding: 8px 12px 8px;
       background: #fff;
-      border-top: 1px solid #f1f5f9;
-      margin: 0 -4px;
-      padding-left: 4px;
-      padding-right: 4px;
+      border-top: 1px solid var(--kb-border);
+    }
+    .composer-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .composer-input-row textarea {
+      flex: 1;
+      min-width: 0;
+      min-height: 56px;
+      max-height: 88px;
+      resize: none;
+    }
+    .composer-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .composer-actions button,
+    .composer-actions .btn {
+      min-width: 76px;
+      padding: 8px 12px;
+      min-height: 36px;
+      font-size: 14px;
+    }
+    .msg {
+      padding: 14px 16px;
+      border-radius: 14px;
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      line-height: 1.7;
+      font-size: 16px;
+      color: var(--kb-text);
+      max-width: 92%;
+    }
+    .msg.user {
+      background: var(--kb-yellow-soft);
+      border: 1px solid rgba(255, 204, 0, 0.45);
+      color: var(--kb-brown-darker);
+      margin-left: auto;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant {
+      background: #fff;
+      border: 1px solid #cfc0ad;
+      color: var(--kb-text);
+      margin-right: auto;
+      border-bottom-left-radius: 4px;
     }
     textarea {
       width: 100%;
-      min-height: 52px;
-      max-height: 140px;
-      resize: none;
-      padding: 14px 14px;
+      min-height: 72px;
+      max-height: 180px;
+      resize: vertical;
+      padding: 14px 16px;
       border-radius: 12px;
-      border: 1px solid #cbd5e1;
+      border: 1px solid #bfb09c;
       font-family: inherit;
       font-size: 16px;
-      line-height: 1.5;
-      -webkit-appearance: none;
-      appearance: none;
+      line-height: 1.6;
+      color: var(--kb-text);
+      background: #fff;
     }
     textarea:focus {
-      outline: 2px solid #a78bfa;
+      outline: 2px solid rgba(255, 204, 0, 0.45);
       outline-offset: 1px;
-      border-color: #7c3aed;
+      border-color: var(--kb-yellow);
     }
     .row {
-      margin-top: 10px;
+      margin-top: 12px;
       display: flex;
       gap: 10px;
-      align-items: stretch;
+      align-items: center;
     }
     button, .btn {
       border: 0;
-      padding: 14px 18px;
-      min-height: 48px;
-      border-radius: 12px;
+      padding: 12px 20px;
+      min-height: 44px;
+      border-radius: 10px;
       cursor: pointer;
       font-size: 16px;
-      font-weight: 600;
+      font-weight: 700;
       text-decoration: none;
       text-align: center;
-      touch-action: manipulation;
-      -webkit-user-select: none;
-      user-select: none;
     }
     button {
-      flex: 1;
-      background: #7c3aed;
-      color: #fff;
+      background: var(--kb-yellow);
+      color: var(--kb-brown-darker);
+      min-width: 96px;
     }
-    button:active { background: #5b21b6; }
+    button:hover { background: var(--kb-yellow-dark); }
     .btn-secondary {
-      flex: 0 0 auto;
-      min-width: 108px;
-      background: #64748b;
+      background: var(--kb-brown);
       color: #fff;
       display: inline-flex;
       align-items: center;
       justify-content: center;
     }
-    .btn-secondary:active { background: #475569; }
-    .notice { color: #059669; font-size: 14px; margin-top: 8px; font-weight: 600; }
-    .msg.assistant.streaming { border-color: #86efac; }
+    .btn-secondary:hover { background: var(--kb-brown-dark); }
+    .notice { color: var(--kb-brown-darker); font-size: 14px; margin-top: 8px; font-weight: 700; }
+    .msg.assistant.streaming { border-color: rgba(255, 204, 0, 0.5); }
+    .msg.assistant.generating .msg-text {
+      color: var(--kb-text-secondary);
+      line-height: 1.75;
+    }
     .msg.assistant.streaming::after {
       content: "▋";
       animation: blink 1s step-end infinite;
       margin-left: 2px;
-      color: #16a34a;
+      color: var(--kb-brown);
     }
     @keyframes blink { 50% { opacity: 0; } }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     .status-line {
       font-size: 13px;
-      color: #64748b;
-      margin: 6px 0 0;
-      min-height: 1.2em;
-      line-height: 1.4;
+      color: var(--kb-text-secondary);
+      margin: 4px 0 0;
+      min-height: 0;
+      font-weight: 500;
     }
     .chat-hint {
-      color: #94a3b8;
-      font-size: 15px;
-      line-height: 1.55;
+      color: var(--kb-text-muted);
+      font-size: 16px;
+      line-height: 1.6;
       margin: 0;
       padding: 8px 4px;
     }
-    .msg-text { white-space: pre-wrap; word-break: break-word; }
+    .msg-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: inherit;
+    }
     .msg-follow-up {
-      margin-top: 14px;
-      padding: 12px 14px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 12px;
+      margin-top: 12px;
+      padding: 0;
+      background: none;
+      border: 0;
     }
     .msg-follow-up .follow-up-label {
-      font-size: 13px;
-      font-weight: 700;
-      color: #475569;
-      margin: 0 0 8px;
-    }
-    .msg-follow-up .follow-up-item {
       font-size: 14px;
-      color: #1e293b;
-      margin: 0;
-      line-height: 1.5;
+      font-weight: 800;
+      color: var(--kb-brown-darker);
+      margin: 0 0 6px;
     }
-    .msg-follow-up .follow-up-item + .follow-up-item { margin-top: 6px; }
+    .msg-follow-up .follow-up-chip {
+      display: block;
+      width: 100%;
+      margin: 0;
+      padding: 4px 0;
+      border: 0;
+      border-radius: 0;
+      background: none;
+      color: var(--kb-brown-darker);
+      font: inherit;
+      font-size: 15px;
+      font-weight: 500;
+      line-height: 1.6;
+      text-align: left;
+      cursor: pointer;
+      word-break: keep-all;
+    }
+    .msg-follow-up .follow-up-chip::before {
+      content: "- ";
+      color: var(--kb-text-muted);
+    }
+    .msg-follow-up .follow-up-chip:hover {
+      color: var(--kb-brown-darker);
+      text-decoration: underline;
+      background: none;
+    }
+    .msg-follow-up .follow-up-chip + .follow-up-chip { margin-top: 0; }
     .chart-block {
       margin-top: 14px;
       padding: 12px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
+      background: var(--kb-yellow-light);
+      border: 1px solid var(--kb-border);
       border-radius: 12px;
     }
     .chart-title {
-      font-size: 13px;
-      font-weight: 700;
-      color: #475569;
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--kb-brown-darker);
       margin: 0 0 8px;
     }
-    .excel-export-wrap {
+    .excel-export-wrap,
+    .report-export-wrap,
+    .msg-action-bar {
       margin-top: 14px;
       padding: 10px 12px;
-      background: #f0fdf4;
-      border: 1px solid #86efac;
+      background: var(--kb-yellow-light);
+      border: 1px solid var(--kb-border);
       border-radius: 12px;
+    }
+    .msg-action-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .excel-export-wrap,
+    .report-export-wrap {
+      display: contents;
     }
     .btn-excel-export {
       border: 0;
@@ -701,27 +894,20 @@ PAGE = """
       min-height: 40px;
       border-radius: 10px;
       cursor: pointer;
-      font-size: 14px;
-      font-weight: 600;
-      background: #16a34a;
+      font-size: 15px;
+      font-weight: 700;
+      background: var(--kb-brown);
       color: #fff;
-      touch-action: manipulation;
     }
-    .btn-excel-export:active { background: #15803d; }
+    .btn-excel-export:hover { background: var(--kb-brown-dark); }
     .btn-excel-export:disabled { opacity: 0.6; cursor: not-allowed; }
     .excel-save-path {
       margin: 8px 0 0;
-      font-size: 12px;
-      color: #166534;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--kb-brown-darker);
       word-break: break-all;
-      line-height: 1.4;
-    }
-    .report-export-wrap {
-      margin-top: 10px;
-      padding: 10px 12px;
-      background: #eff6ff;
-      border: 1px solid #93c5fd;
-      border-radius: 12px;
+      flex-basis: 100%;
     }
     .btn-report-export {
       border: 0;
@@ -729,25 +915,38 @@ PAGE = """
       min-height: 40px;
       border-radius: 10px;
       cursor: pointer;
-      font-size: 14px;
-      font-weight: 600;
-      background: #2563eb;
+      font-size: 15px;
+      font-weight: 700;
+      background: var(--kb-brown-dark);
       color: #fff;
-      touch-action: manipulation;
     }
-    .btn-report-export:active { background: #1d4ed8; }
+    .btn-report-export:hover { background: var(--kb-brown-darker); }
     .btn-report-export:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-chart-generate {
+      border: 0;
+      padding: 10px 18px;
+      min-height: 40px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: 800;
+      background: var(--kb-yellow);
+      color: var(--kb-brown-darker);
+    }
+    .btn-chart-generate:hover { background: var(--kb-yellow-dark); }
+    .btn-chart-generate:disabled { opacity: 0.6; cursor: not-allowed; }
     .report-save-path {
       margin: 8px 0 0;
-      font-size: 12px;
-      color: #1e40af;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--kb-brown-darker);
       word-break: break-all;
-      line-height: 1.4;
+      flex-basis: 100%;
     }
     .chart-canvas-wrap {
       position: relative;
       width: 100%;
-      height: min(280px, 42vh);
+      height: 320px;
     }
     .pdf-link-wrap {
       margin-top: 12px;
@@ -756,167 +955,126 @@ PAGE = """
     }
     .pdf-link {
       display: inline-block;
-      font-size: 14px;
-      font-weight: 600;
-      color: #6d28d9;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--kb-brown-darker);
       word-break: break-all;
     }
-    .inst1-table-block {
-      margin-top: 12px;
-      overflow-x: auto;
-    }
-    .inst1-sql-block {
-      margin-top: 10px;
-    }
+    .inst1-table-block { margin-top: 12px; overflow-x: auto; }
+    .inst1-sql-block { margin-top: 10px; }
     .inst1-sql-label {
-      font-size: 12px;
-      font-weight: 700;
-      color: #475569;
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--kb-brown-darker);
       margin: 0 0 6px;
     }
     .inst1-sql {
       margin: 0;
       padding: 10px 12px;
-      background: #0f172a;
-      color: #e2e8f0;
+      background: var(--kb-brown-darker);
+      color: #f1f5f9;
       border-radius: 8px;
-      font-size: 12px;
-      line-height: 1.5;
+      font-size: 13px;
+      line-height: 1.55;
       overflow-x: auto;
       white-space: pre-wrap;
       word-break: break-all;
     }
-    .inst1-table-wrap { max-width: 100%; }
     .inst1-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 12px;
+      font-size: 14px;
+      color: var(--kb-text);
     }
     .inst1-table th, .inst1-table td {
-      border: 1px solid #e2e8f0;
-      padding: 6px 8px;
+      border: 1px solid #bfb09c;
+      padding: 9px 11px;
       text-align: left;
       white-space: nowrap;
     }
     .inst1-table th {
-      background: #f1f5f9;
+      background: var(--kb-yellow-light);
       font-weight: 700;
-    }
-    .member-bar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 8px 12px;
-      margin-top: 10px;
-      padding: 10px 12px;
-      background: #f5f3ff;
-      border: 1px solid #ddd6fe;
-      border-radius: 10px;
-      font-size: 13px;
-      color: #4c1d95;
-    }
-    .member-bar strong { font-weight: 700; }
-    .member-bar .meta { color: #64748b; }
-    .member-bar .logout {
-      margin-left: auto;
-      font-size: 13px;
-      font-weight: 600;
-      color: #6d28d9;
-      text-decoration: none;
-      padding: 6px 10px;
-      border-radius: 8px;
-      background: #ede9fe;
-    }
-    .member-bar .logout:active { background: #ddd6fe; }
-
-    @media (max-width: 520px) {
-      body {
-        padding: max(8px, env(safe-area-inset-top, 0px))
-                 max(8px, env(safe-area-inset-right, 0px))
-                 max(8px, env(safe-area-inset-bottom, 0px))
-                 max(8px, env(safe-area-inset-left, 0px));
-      }
-      .page-wrap {
-        min-height: 100dvh;
-        min-height: 100vh;
-        gap: 8px;
-      }
-      .panel {
-        border-radius: 14px 14px 0 0;
-        padding: 14px 12px 10px;
-        box-shadow: 0 -2px 16px rgba(124, 58, 237, 0.08);
-      }
-      .chat-box {
-        min-height: min(42dvh, 360px);
-        margin-top: 10px;
-      }
-      .row { gap: 8px; }
-      .btn-secondary { min-width: 96px; padding-left: 12px; padding-right: 12px; }
-    }
-
-    @media (max-height: 520px) and (orientation: landscape) {
-      .chat-box { min-height: 120px; max-height: 40vh; }
-      textarea { min-height: 44px; }
+      color: var(--kb-brown-darker);
     }
   </style>
 </head>
 <body>
-  <div class="page-wrap">
-  {% if not db_configured %}
-  <div class="banner banner-warn">
-    <strong>DB 미연결:</strong> <code>SUPABASE_DB_URL</code> 설정 시 요약이 동작합니다.
-  </div>
-  {% endif %}
-  {% if not aws_configured %}
-  <div class="banner banner-err">
-    <strong>AI 미설정:</strong> AWS 자격 증명이 필요합니다.
-  </div>
-  {% endif %}
-  <section class="panel">
-    <header class="panel-header">
-      <h1>KB AI 데이터 리터러시</h1>
-      <div class="suggested-prompts">
-        <p class="suggested-label">추천질문</p>
-        <p class="suggested-item">26.04월 그룹고객기본정보의 KB스타클럽그룹최고등급별, 성별구분별 고객수 집계해줘</p>
-        <p class="suggested-item">26.04월 그룹고객기본정보, 그룹고객거래기본의 연령코드별, 수신잔액별 고객수 집계해줘</p>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <h1>KB AI 데이터 리터러시</h1>
+        <p>그룹고객 데이터 분석 채팅</p>
       </div>
-      <div class="suggested-prompts inst1-tables">
-        <p class="suggested-label">분석가능 테이블</p>
-        {% for item in inst1_tables %}
-        <p class="suggested-item">{{ item.label }}</p>
-        {% endfor %}
+      <div class="sidebar-body">
+        <section class="sidebar-section">
+          <p class="sidebar-section-title">추천질문</p>
+          <p class="prompt-chip">26.04월 그룹고객기본정보의 KB스타클럽그룹최고등급별, 성별구분별 고객수 집계해줘</p>
+          <p class="prompt-chip">26.04월 그룹고객기본정보, 그룹고객거래기본의 연령코드별, 거래기간구분별 고객수 집계해줘</p>
+        </section>
+        <section class="sidebar-section">
+          <p class="sidebar-section-title">분석가능 테이블</p>
+          {% for item in inst1_tables %}
+          <p class="table-chip" data-table="{{ item.table }}">{{ item.label }}</p>
+          {% endfor %}
+        </section>
       </div>
       {% if member %}
-      <div class="member-bar">
-        <span><strong>{{ member.회원명 }}</strong> ({{ member.아이디 }})</span>
-        {% if member.부서명 %}<span class="meta">{{ member.부서명 }}</span>{% endif %}
-        {% if member.이메일 %}<span class="meta">{{ member.이메일 }}</span>{% endif %}
-        <a class="logout" href="{{ url_for('logout') }}">로그아웃</a>
+      <div class="sidebar-footer">
+        <div class="member-card">
+          <strong>{{ member.회원명 }} ({{ member.아이디 }})</strong>
+          {% if member.부서명 %}<span class="meta">{{ member.부서명 }}</span>{% endif %}
+          {% if member.이메일 %}<span class="meta">{{ member.이메일 }}</span>{% endif %}
+          <a class="logout" href="{{ url_for('logout') }}">로그아웃</a>
+        </div>
       </div>
       {% endif %}
-    </header>
-    <div class="chat-box" id="chatBox" role="log" aria-live="polite"></div>
-    <div class="composer">
-      <form id="chatForm" action="#" method="post" onsubmit="return false;">
-        <textarea id="messageInput" name="message" rows="2"
-          placeholder="메시지 입력 (Enter 전송, Shift+Enter 줄바꿈)" required
-          enterkeyhint="send" autocomplete="off" autocapitalize="sentences"></textarea>
-        <div class="row">
-          <button type="button" id="sendBtn" onclick="window.cultureSend && window.cultureSend()">전송</button>
-          <a class="btn btn-secondary" href="{{ url_for('clear_chat') }}">비우기</a>
+    </aside>
+
+    <main class="main">
+      <div class="main-alerts">
+        {% if not db_configured %}
+        <div class="banner banner-warn">
+          <strong>DB 미연결:</strong> <code>SUPABASE_DB_URL</code> 설정 시 요약이 동작합니다.
         </div>
-      </form>
-      <p class="status-line" id="statusLine"></p>
-      <div class="notice" id="chatNotice" style="display:none;"></div>
-    </div>
-  </section>
+        {% endif %}
+        {% if not aws_configured %}
+        <div class="banner banner-err">
+          <strong>AI 미설정:</strong> AWS 자격 증명이 필요합니다.
+        </div>
+        {% endif %}
+      </div>
+
+      <section class="chat-panel">
+        <div class="chat-box" id="chatBox" role="log" aria-live="polite"></div>
+        <div class="composer">
+          <form id="chatForm" action="#" method="post" onsubmit="return false;">
+            <div class="composer-input-row">
+              <textarea id="messageInput" name="message" rows="2"
+                placeholder="질문을 입력하세요 (Enter 전송, Shift+Enter 줄바꿈)" required
+                autocomplete="off"></textarea>
+              <div class="composer-actions">
+                <button type="button" id="sendBtn" onclick="window.cultureSend && window.cultureSend()">질문</button>
+                <a class="btn btn-secondary" href="{{ url_for('clear_chat') }}">비우기</a>
+              </div>
+            </div>
+          </form>
+          <p class="status-line" id="statusLine"></p>
+          <div class="notice" id="chatNotice" style="display:none;"></div>
+        </div>
+      </section>
+    </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="/static/culture_chat.js?v=30"></script>
+  <script src="/static/culture_chat.js?v=47"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
-        CultureChat.init({ history: {{ chat_history | tojson }}, preferStream: false });
+        CultureChat.init({
+          history: {{ chat_history | tojson }},
+          preferStream: false,
+          inst1Tables: {{ inst1_tables | tojson }},
+        });
       } else {
         console.error("culture_chat.js 로드 실패");
       }
@@ -959,10 +1117,11 @@ def export_excel_api():
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name=saved_path.name,
+        download_name=saved_path.name if saved_path else filename,
     )
-    resp.headers["X-Saved-Path"] = str(saved_path)
-    resp.headers["Access-Control-Expose-Headers"] = "X-Saved-Path"
+    if saved_path:
+        resp.headers["X-Saved-Path"] = str(saved_path)
+        resp.headers["Access-Control-Expose-Headers"] = "X-Saved-Path"
     return resp
 
 
@@ -989,11 +1148,52 @@ def export_report_api():
         buf,
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=saved_path.name,
+        download_name=saved_path.name if saved_path else filename,
     )
-    resp.headers["X-Saved-Path"] = str(saved_path)
-    resp.headers["Access-Control-Expose-Headers"] = "X-Saved-Path"
+    if saved_path:
+        resp.headers["X-Saved-Path"] = str(saved_path)
+        resp.headers["Access-Control-Expose-Headers"] = "X-Saved-Path"
     return resp
+
+
+@app.route("/api/generate/chart", methods=["POST"])
+def generate_chart_api():
+    """세션 pending_chart 기반 막대 차트 생성."""
+    ensure_session_lists()
+    pending = session.get("pending_chart") or {}
+    if not pending.get("rows"):
+        return jsonify(
+            {"ok": False, "error": "차트로 그릴 집계 데이터가 없습니다. 먼저 집계 데이터를 조회해 주세요."}
+        ), 400
+    try:
+        specs = build_aggregate_chart_specs(pending)
+        if not specs:
+            raise ValueError("차트 데이터가 비어 있습니다.")
+        display = pending.get("display_label") or "집계 데이터"
+        analysis = {"intent": "inst1_chart", "reason": "집계 데이터 차트 생성"}
+        text = format_chart_agent_reply(analysis, pending, specs)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    history = list(session.get("chat_history", []))
+    for i in range(len(history) - 1, -1, -1):
+        item = history[i]
+        if item.get("role") == "assistant" and item.get("chart_available"):
+            item["charts"] = specs
+            item["chart_available"] = False
+            history[i] = item
+            break
+    session["chat_history"] = history
+    session.pop("pending_chart", None)
+    session.modified = True
+
+    return jsonify(
+        {
+            "ok": True,
+            "charts": specs,
+            "reply": text,
+        }
+    )
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1021,6 +1221,10 @@ def chat_api():
             follow_up_questions,
             excel_export,
             report_export,
+            chart_available,
+            aggregate_column_options,
+            aggregate_column_label,
+            aggregate_column_pick_mode,
         ) = run_chat(
             raw, history, table_name=table_name
         )
@@ -1037,8 +1241,12 @@ def chat_api():
                 "inst1_result_labels": inst1_result_labels,
                 "inst1_queries": inst1_queries,
                 "follow_up_questions": follow_up_questions,
+                "aggregate_column_options": aggregate_column_options,
+                "aggregate_column_label": aggregate_column_label,
+                "aggregate_column_pick_mode": aggregate_column_pick_mode,
                 "excel_export": excel_export,
                 "report_export": report_export,
+                "chart_available": chart_available,
             }
         )
         session["chat_history"] = history
@@ -1055,8 +1263,12 @@ def chat_api():
                 "inst1_result_labels": inst1_result_labels,
                 "inst1_queries": inst1_queries,
                 "follow_up_questions": follow_up_questions,
+                "aggregate_column_options": aggregate_column_options,
+                "aggregate_column_label": aggregate_column_label,
+                "aggregate_column_pick_mode": aggregate_column_pick_mode,
                 "excel_export": excel_export,
                 "report_export": report_export,
+                "chart_available": chart_available,
             }
         )
     except Exception as e:
@@ -1210,19 +1422,6 @@ def chat_stream():
     session["chat_history"] = history
     session.modified = True
 
-    _NODE_STATUS = {
-        "analyze": "질문 분석 에이전트…",
-        "table_prompt": "테이블 추천 질문 생성…",
-        "aggregate_prompt": "집계 컬럼 선택 안내…",
-        "column_desc": "컬럼 설명 생성…",
-        "data_summary": "데이터 요약 생성…",
-        "chart": "집계 데이터 차트 생성…",
-        "fetch_inst1": "SQL 생성 및 INST1 데이터 추출…",
-        "format_inst1": "추출 결과 포맷…",
-        "general": "일반 대화 응답 생성…",
-        "reply": "최종 응답 조립…",
-    }
-
     def generate():
         try:
             executor = get_executor()
@@ -1243,12 +1442,12 @@ def chat_stream():
                 "pending_aggregate": session.get("pending_aggregate") or {},
                 "pending_chart": session.get("pending_chart") or {},
                 "chart_specs": [],
+                "chart_available": False,
             }
             final: dict[str, Any] = {}
             for chunk in executor.stream(initial, stream_mode="updates"):
                 for node_name, update in chunk.items():
-                    status = _NODE_STATUS.get(node_name, f"{node_name}…")
-                    yield _sse_event({"type": "status", "text": status, "node": node_name})
+                    yield _sse_event(build_workflow_status_event(node_name))
                     yield _sse_pad()
                     if isinstance(update, dict):
                         final.update(update)
@@ -1262,13 +1461,21 @@ def chat_stream():
             notice = final.get("notice") or ""
             charts = list(final.get("chart_specs") or [])
             pdf_url = (final.get("pdf_url") or "").strip()
-            inst1_data = dict(final.get("inst1_data") or {})
+            inst1_data = mask_inst1_data_for_display(dict(final.get("inst1_data") or {}))
             inst1_column_orders = dict(final.get("inst1_column_orders") or {})
             inst1_result_labels = dict(final.get("inst1_result_labels") or {})
             inst1_queries = dict(final.get("inst1_queries") or {})
             follow_up_questions = list(final.get("follow_up_questions") or [])
-            excel_export = dict(final.get("excel_export") or {})
-            report_export = dict(final.get("report_export") or {})
+            aggregate_column_options = list(final.get("aggregate_column_options") or [])
+            aggregate_column_label = (final.get("aggregate_column_label") or "").strip()
+            aggregate_column_pick_mode = (
+                final.get("aggregate_column_pick_mode") or "append"
+            ).strip()
+            excel_export = mask_excel_export_for_display(dict(final.get("excel_export") or {}))
+            report_export = _client_report_export(dict(final.get("report_export") or {}))
+            _sync_pending_aggregate_session(session, final)
+            _sync_pending_chart_session(session, final)
+            chart_available = _chart_available_from_final(final)
             history.append(
                 {
                     "role": "assistant",
@@ -1280,13 +1487,15 @@ def chat_stream():
                     "inst1_result_labels": inst1_result_labels,
                     "inst1_queries": inst1_queries,
                     "follow_up_questions": follow_up_questions,
+                    "aggregate_column_options": aggregate_column_options,
+                    "aggregate_column_label": aggregate_column_label,
+                    "aggregate_column_pick_mode": aggregate_column_pick_mode,
                     "excel_export": excel_export,
                     "report_export": report_export,
+                    "chart_available": chart_available,
                 }
             )
             session["chat_history"] = history
-            _sync_pending_aggregate_session(session, final)
-            _sync_pending_chart_session(session, final)
             session.modified = True
             yield _sse_event({"type": "chunk", "text": full_text})
             yield _sse_pad()
@@ -1302,8 +1511,12 @@ def chat_stream():
                     "inst1_result_labels": inst1_result_labels,
                     "inst1_queries": inst1_queries,
                     "follow_up_questions": follow_up_questions,
+                    "aggregate_column_options": aggregate_column_options,
+                    "aggregate_column_label": aggregate_column_label,
+                    "aggregate_column_pick_mode": aggregate_column_pick_mode,
                     "excel_export": excel_export,
                     "report_export": report_export,
+                    "chart_available": chart_available,
                 }
             )
         except Exception as e:

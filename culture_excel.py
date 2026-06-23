@@ -1,6 +1,7 @@
 """엑셀 저장 에이전트 — 차트·집계 조회 데이터를 .xlsx로보내기."""
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from io import BytesIO
@@ -36,8 +37,10 @@ def ascii_export_filename(prefix: str = "culture_export") -> str:
     return f"{safe}_{ts}.xlsx"
 
 
-def save_excel_to_disk(content: bytes, filename: str) -> Path:
-    """로컬 PC culture/exports 폴더에 xlsx 저장."""
+def save_excel_to_disk(content: bytes, filename: str) -> Path | None:
+    """로컬 PC culture/exports 폴더에 xlsx 저장. Vercel 등 읽기 전용 FS에서는 None."""
+    if os.environ.get("VERCEL"):
+        return None
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = EXPORT_DIR / safe_excel_filename(filename)
     path.write_bytes(content)

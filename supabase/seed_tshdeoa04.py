@@ -1,4 +1,4 @@
-"""INST1.TSHDEOA01 테이블 시드 적용."""
+"""INST1.TSHDEOA04 테이블 시드 적용."""
 from __future__ import annotations
 
 import os
@@ -32,28 +32,35 @@ def main() -> None:
     sys.path.insert(0, str(ROOT))
     import psycopg2
 
-    from supabase.table_config import TSHDEOA01_SCHEMA, TSHDEOA01_TABLE
-    from supabase.tshdeoa01_seed import TSHDEOA01_ALL_ROWS, TSHDEOA01_UPSERT_SQL
-    from supabase.tshdeoa01_setup import ensure_tshdeoa01_table
+    from supabase.table_config import TSHDEOA04_SCHEMA, TSHDEOA04_TABLE
+    from supabase.tshdeoa04_seed import TSHDEOA04_ALL_ROWS, TSHDEOA04_UPSERT_SQL
+    from supabase.tshdeoa04_setup import ensure_tshdeoa04_table
 
     with psycopg2.connect(db_url()) as conn:
-        ensure_tshdeoa01_table(conn)
+        ensure_tshdeoa04_table(conn)
         with conn.cursor() as cur:
-            for row in TSHDEOA01_ALL_ROWS:
-                cur.execute(TSHDEOA01_UPSERT_SQL, row)
+            for month in ("202602", "202603", "202604"):
+                cur.execute(
+                    f'DELETE FROM "{TSHDEOA04_SCHEMA}"."{TSHDEOA04_TABLE}" '
+                    f'WHERE "기준년월" = %s AND "그룹회사코드" = %s',
+                    (month, "KFG"),
+                )
+            for row in TSHDEOA04_ALL_ROWS:
+                cur.execute(TSHDEOA04_UPSERT_SQL, row)
             counts: dict[str, int] = {}
             for month in ("202602", "202603", "202604"):
                 cur.execute(
-                    f'SELECT COUNT(*) FROM "{TSHDEOA01_SCHEMA}"."{TSHDEOA01_TABLE}" '
+                    f'SELECT COUNT(*) FROM "{TSHDEOA04_SCHEMA}"."{TSHDEOA04_TABLE}" '
                     f'WHERE "기준년월" = %s AND "그룹회사코드" = %s',
                     (month, "KFG"),
                 )
                 counts[month] = cur.fetchone()[0]
         conn.commit()
 
-    print(f"OK: seeded {len(TSHDEOA01_ALL_ROWS)} rows into {TSHDEOA01_SCHEMA}.{TSHDEOA01_TABLE}")
+    print(f"OK: seeded {len(TSHDEOA04_ALL_ROWS)} rows into {TSHDEOA04_SCHEMA}.{TSHDEOA04_TABLE}")
     for month in ("202602", "202603", "202604"):
         print(f"  {month}/KFG rows in table: {counts[month]}")
+
 
 if __name__ == "__main__":
     main()

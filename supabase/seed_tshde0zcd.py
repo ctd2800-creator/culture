@@ -50,6 +50,7 @@ def main() -> None:
                 ("100243000", "고객구분코드"),
                 ("101644000", "성별구분코드"),
                 ("102132000", "여부"),
+                ("132648000", "FG그룹직업분류코드"),
             ]
             counts: list[tuple[str, int]] = []
             for inst_id, inst_name in summary:

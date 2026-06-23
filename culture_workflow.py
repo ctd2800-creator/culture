@@ -14,13 +14,16 @@ from botocore.exceptions import ClientError
 from langgraph.graph import END, START, StateGraph
 
 from culture_inst1_agents import (
-    AGGREGATE_CHART_FOLLOW_UP,
     INST1_TABLE_KOREAN_NAMES,
     analyze_question,
+    aggregate_column_options_label,
+    aggregate_column_pick_mode,
     build_aggregate_chart_specs,
+    build_aggregate_column_options,
     build_inst1_excel_export,
     build_pending_chart_payload,
     build_report_export,
+    build_table_prompt_follow_up_questions,
     explain_inst1_columns,
     extract_inst1_data,
     format_chart_agent_reply,
@@ -29,6 +32,7 @@ from culture_inst1_agents import (
     format_inst1_table_prompt_reply,
     summarize_inst1_table_data,
     with_agent_banner,
+    _normalize_group_by,
 )
 
 # Claude Sonnet 최신 (Bedrock) — BEDROCK_MODEL_ID 로 덮어쓸 수 있음
@@ -85,6 +89,10 @@ class CultureState(TypedDict, total=False):
     excel_export: dict[str, Any]
     report_export: dict[str, Any]
     follow_up_questions: list[str]
+    aggregate_column_options: list[str]
+    aggregate_column_label: str
+    aggregate_column_pick_mode: str
+    chart_available: bool
 
 
 _graph_executor = None
@@ -415,19 +423,54 @@ def table_prompt_node(state: CultureState) -> dict[str, Any]:
     """테이블명만 언급된 경우 추천 질문 응답."""
     analysis = state.get("question_analysis") or {}
     text = format_inst1_table_prompt_reply(analysis)
-    return {"summary": text, "reply": text}
+    table = (analysis.get("tables") or [None])[0]
+    korean = analysis.get("table_korean") or INST1_TABLE_KOREAN_NAMES.get(
+        table or "", table or ""
+    )
+    return {
+        "summary": text,
+        "reply": text,
+        "follow_up_questions": build_table_prompt_follow_up_questions(korean),
+    }
 
 
 def aggregate_prompt_node(state: CultureState) -> dict[str, Any]:
-    """집계 컬럼 선택 안내 에이전트."""
+    """집계 컬럼 선택 안내 에이전트 (1단계 조회 → 2단계 집계 항목 → 3단계 집계 함수)."""
     analysis = state.get("question_analysis") or {}
+    stage = (analysis.get("aggregate_stage") or "group_by").strip()
     text = format_inst1_aggregate_prompt_reply(analysis)
     table = (analysis.get("tables") or [None])[0]
     korean = analysis.get("table_korean") or ""
     pending: dict[str, Any] = {}
     if table:
-        pending = {"table": table, "korean": korean}
-    return {"summary": text, "reply": text, "pending_aggregate": pending}
+        if stage == "aggregate_func":
+            pending = {
+                "table": table,
+                "korean": korean,
+                "stage": "aggregate_func",
+                "group_by": _normalize_group_by(analysis.get("group_by")),
+                "aggregate_measures": list(analysis.get("aggregate_measures") or []),
+                "aggregate_measure_funcs": dict(
+                    analysis.get("aggregate_measure_funcs") or {}
+                ),
+            }
+        elif stage == "measure":
+            pending = {
+                "table": table,
+                "korean": korean,
+                "stage": "measure",
+                "group_by": _normalize_group_by(analysis.get("group_by")),
+            }
+        else:
+            pending = {"table": table, "korean": korean, "stage": "group_by"}
+    return {
+        "summary": text,
+        "reply": text,
+        "pending_aggregate": pending,
+        "aggregate_column_options": build_aggregate_column_options(analysis),
+        "aggregate_column_label": aggregate_column_options_label(analysis),
+        "aggregate_column_pick_mode": aggregate_column_pick_mode(analysis),
+    }
 
 
 def column_desc_node(state: CultureState) -> dict[str, Any]:
@@ -454,19 +497,12 @@ def chart_node(state: CultureState) -> dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
     display = pending.get("display_label") or "집계 데이터"
-    report_export = build_report_export(
-        agent="inst1_chart",
-        content=text,
-        table_label=display,
-        month=str(pending.get("month") or ""),
-        chart_specs=specs,
-    )
     return {
         "summary": text,
         "reply": text,
         "chart_specs": specs,
         "excel_export": {},
-        "report_export": report_export,
+        "report_export": {},
         "pending_chart": {},
     }
 
@@ -540,7 +576,7 @@ def format_inst1_node(state: CultureState) -> dict[str, Any]:
     pending_chart = build_pending_chart_payload(analysis, extract_result)
     if pending_chart:
         out["pending_chart"] = pending_chart
-        out["follow_up_questions"] = [AGGREGATE_CHART_FOLLOW_UP]
+        out["chart_available"] = True
     if analysis.get("intent") == "inst1_extract" and extract_result.get("total_rows", 0) > 0:
         excel_export = build_inst1_excel_export(extract_result, analysis)
         if excel_export:
@@ -603,6 +639,10 @@ def reply_node(state: CultureState) -> dict[str, Any]:
     excel_export = dict(state.get("excel_export") or {})
     report_export = dict(state.get("report_export") or {})
     follow_up = list(state.get("follow_up_questions") or [])
+    aggregate_columns = list(state.get("aggregate_column_options") or [])
+    aggregate_label = (state.get("aggregate_column_label") or "").strip()
+    aggregate_pick_mode = (state.get("aggregate_column_pick_mode") or "append").strip()
+    chart_available = bool(state.get("chart_available"))
     if preset:
         return {
             "reply": preset,
@@ -612,6 +652,10 @@ def reply_node(state: CultureState) -> dict[str, Any]:
             "excel_export": excel_export,
             "report_export": report_export,
             "follow_up_questions": follow_up,
+            "aggregate_column_options": aggregate_columns,
+            "aggregate_column_label": aggregate_label,
+            "aggregate_column_pick_mode": aggregate_pick_mode,
+            "chart_available": chart_available,
         }
     if not summary:
         return {
@@ -622,6 +666,10 @@ def reply_node(state: CultureState) -> dict[str, Any]:
             "excel_export": excel_export,
             "report_export": report_export,
             "follow_up_questions": follow_up,
+            "aggregate_column_options": aggregate_columns,
+            "aggregate_column_label": aggregate_label,
+            "aggregate_column_pick_mode": aggregate_pick_mode,
+            "chart_available": chart_available,
         }
     return {
         "reply": summary,
@@ -631,6 +679,10 @@ def reply_node(state: CultureState) -> dict[str, Any]:
         "excel_export": excel_export,
         "report_export": report_export,
         "follow_up_questions": follow_up,
+        "aggregate_column_options": aggregate_columns,
+        "aggregate_column_label": aggregate_label,
+        "aggregate_column_pick_mode": aggregate_pick_mode,
+        "chart_available": chart_available,
     }
 
 
@@ -716,6 +768,10 @@ def run_workflow(
         "excel_export": {},
         "report_export": {},
         "follow_up_questions": [],
+        "aggregate_column_options": [],
+        "aggregate_column_label": "",
+        "aggregate_column_pick_mode": "append",
+        "chart_available": False,
     }
     try:
         return get_executor().invoke(initial)

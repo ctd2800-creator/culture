@@ -9,6 +9,7 @@ _TS_TRADE = "2010-02-01 00:00:00"
 _TS_KFG = "2020-07-20 10:04:06"
 _TS_KP0 = "2021-06-02 14:45:14"
 _TS_CODE = "2010-02-01 00:00:00"
+_TS_JOB = "2018-03-21 00:00:00"
 
 _TRADE_PERIOD_LABELS: dict[int, str] = {
     0: "해당무",
@@ -131,6 +132,30 @@ TSHDE0ZCD_YN_ROWS: list[tuple] = [
     for code, label in (("0", "부"), ("1", "여"))
 ]
 
+TSHDE0ZCD_JOB_CLASS_ROWS: list[tuple] = [
+    (
+        "KFG",
+        "132648000",
+        code,
+        "20180321",
+        "99991231",
+        "FG그룹직업분류코드",
+        label,
+        _TS_JOB,
+        _TS_JOB,
+    )
+    for code, label in (
+        ("1", "공무원(공공기관,군인 등 포함)"),
+        ("2", "직장인"),
+        ("3", "전문직"),
+        ("4", "자영업자"),
+        ("5", "학생(대학원)"),
+        ("6", "주부"),
+        ("7", "연금(임대소득자)"),
+        ("9", "기타"),
+    )
+]
+
 TSHDE0ZCD_ROWS: list[tuple] = (
     TSHDE0ZCD_AGE_ROWS
     + TSHDE0ZCD_TRADE_PERIOD_ROWS
@@ -138,6 +163,7 @@ TSHDE0ZCD_ROWS: list[tuple] = (
     + TSHDE0ZCD_CUSTOMER_TYPE_ROWS
     + TSHDE0ZCD_GENDER_ROWS
     + TSHDE0ZCD_YN_ROWS
+    + TSHDE0ZCD_JOB_CLASS_ROWS
 )
 
 TSHDE0ZCD_UPSERT_SQL = f"""

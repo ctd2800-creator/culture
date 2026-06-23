@@ -135,39 +135,106 @@ TSHDEOA02_GROUP_ALIASES: dict[str, str] = {
     "해지계약수": "당월상품해지계약수",
 }
 
+TSHDEOA04_SCHEMA = "INST1"
+TSHDEOA04_TABLE = "TSHDEOA04"
+TSHDEOA04_KOREAN_NAME = "그룹고객소득대출정보"
+TSHDEOA04_FQN = f'{TSHDEOA04_SCHEMA}."{TSHDEOA04_TABLE}"'
+TSHDEOA04_PK_CONSTRAINT = "TSHDEOA04_pkey"
+
+TSHDEOA04_COLUMNS: tuple[str, ...] = (
+    "기준년월",
+    "그룹회사코드",
+    "그룹고객식별자",
+    "그룹직업분류코드",
+    "급여이체여부",
+    "급여이체금액",
+    "최근3개월급여이체평균금액",
+    "연소득금액",
+    "연본인근로소득",
+    "연본인사업소득",
+    "그룹총대출잔액",
+    "그룹연체잔액",
+    "그룹최대연체일수",
+)
+
+TSHDEOA04_AGGREGATE_COLUMNS: tuple[str, ...] = (
+    "기준년월",
+    "그룹회사코드",
+    "그룹직업분류코드",
+    "급여이체여부",
+    "급여이체금액",
+    "최근3개월급여이체평균금액",
+    "연소득금액",
+    "연본인근로소득",
+    "연본인사업소득",
+    "그룹총대출잔액",
+    "그룹연체잔액",
+    "그룹최대연체일수",
+)
+
+TSHDEOA04_NUMERIC_COLUMNS: frozenset[str] = frozenset(
+    {
+        "급여이체금액",
+        "최근3개월급여이체평균금액",
+        "연소득금액",
+        "연본인근로소득",
+        "연본인사업소득",
+        "그룹총대출잔액",
+        "그룹연체잔액",
+        "그룹최대연체일수",
+    }
+)
+
+TSHDEOA04_GROUP_ALIASES: dict[str, str] = {
+    "직업분류": "그룹직업분류코드",
+    "급여이체": "급여이체여부",
+    "연소득": "연소득금액",
+    "근로소득": "연본인근로소득",
+    "사업소득": "연본인사업소득",
+    "대출잔액": "그룹총대출잔액",
+    "연체잔액": "그룹연체잔액",
+    "연체일수": "그룹최대연체일수",
+}
+
 INST1_AGGREGATE_COLUMNS: dict[str, tuple[str, ...]] = {
     TSHDEOA01_TABLE: TSHDEOA01_AGGREGATE_COLUMNS,
     TSHDEOA02_TABLE: TSHDEOA02_AGGREGATE_COLUMNS,
+    TSHDEOA04_TABLE: TSHDEOA04_AGGREGATE_COLUMNS,
 }
 
 INST1_GROUP_ALIASES: dict[str, dict[str, str]] = {
     TSHDEOA01_TABLE: TSHDEOA01_GROUP_ALIASES,
     TSHDEOA02_TABLE: TSHDEOA02_GROUP_ALIASES,
+    TSHDEOA04_TABLE: TSHDEOA04_GROUP_ALIASES,
 }
 
 INST1_NUMERIC_COLUMNS: dict[str, frozenset[str]] = {
     TSHDEOA01_TABLE: TSHDEOA01_NUMERIC_COLUMNS,
     TSHDEOA02_TABLE: TSHDEOA02_NUMERIC_COLUMNS,
+    TSHDEOA04_TABLE: TSHDEOA04_NUMERIC_COLUMNS,
 }
 
 # TSHDEOA01·TSHDEOA02 조인 키
 INST1_JOIN_KEYS: tuple[str, ...] = ("기준년월", "그룹회사코드", "그룹고객식별자")
 
-INST1_TABLE_ORDER: tuple[str, ...] = (TSHDEOA01_TABLE, TSHDEOA02_TABLE)
+INST1_TABLE_ORDER: tuple[str, ...] = (TSHDEOA01_TABLE, TSHDEOA02_TABLE, TSHDEOA04_TABLE)
 
 INST1_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     TSHDEOA01_TABLE: TSHDEOA01_COLUMNS,
     TSHDEOA02_TABLE: TSHDEOA02_COLUMNS,
+    TSHDEOA04_TABLE: TSHDEOA04_COLUMNS,
 }
 
 INST1_TABLE_KOREAN_NAMES: dict[str, str] = {
     TSHDEOA01_TABLE: TSHDEOA01_KOREAN_NAME,
     TSHDEOA02_TABLE: TSHDEOA02_KOREAN_NAME,
+    TSHDEOA04_TABLE: TSHDEOA04_KOREAN_NAME,
 }
 
 INST1_TABLE_SQL_ALIAS: dict[str, str] = {
     TSHDEOA01_TABLE: "a01",
     TSHDEOA02_TABLE: "a02",
+    TSHDEOA04_TABLE: "a04",
 }
 
 INST1_TABLE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -180,6 +247,12 @@ INST1_TABLE_ALIASES: dict[str, tuple[str, ...]] = {
         TSHDEOA02_KOREAN_NAME,
         "그룹 고객 거래기본",
         "그룹고객 거래기본",
+    ),
+    TSHDEOA04_TABLE: (
+        TSHDEOA04_KOREAN_NAME,
+        "그룹 고객 소득대출정보",
+        "그룹고객 소득대출정보",
+        "소득대출",
     ),
 }
 
@@ -209,11 +282,11 @@ INST1_TABLE_ALIASES[TSHDE0ZCD_TABLE] = (
     "인스턴스목록",
 )
 
-# INST1 스키마 테이블 — UI 표시 순서 (테이블명, 한글명)
+# INST1 스키마 테이블 — UI 「분석가능 테이블」 표시 순서 (테이블명, 한글명)
 INST1_SCHEMA_TABLES: tuple[tuple[str, str], ...] = (
     (TSHDEOA01_TABLE, TSHDEOA01_KOREAN_NAME),
     (TSHDEOA02_TABLE, TSHDEOA02_KOREAN_NAME),
-    (TSHDE0ZCD_TABLE, TSHDE0ZCD_KOREAN_NAME),
+    (TSHDEOA04_TABLE, TSHDEOA04_KOREAN_NAME),
 )
 
 
@@ -246,6 +319,7 @@ COLUMN_INSTANCE_IDS: dict[str, str] = {
     "거래기간구분": "106308000",
     "급여이체여부": "102132000",
     "연금이체여부": "102132000",
+    "그룹직업분류코드": "132648000",
 }
 
 # 채팅 요약 요청 시 테이블을 가리키는 표현
@@ -260,6 +334,9 @@ TABLE_QUERY_KEYWORDS = (
     "그룹고객기본정보",
     "TSHDEOA02",
     "그룹고객거래기본",
+    "TSHDEOA04",
+    "TSHDE0A04",
+    "그룹고객소득대출정보",
     "TSHDE0ZCD",
     "TSHDEO",
 )
