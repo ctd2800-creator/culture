@@ -64,6 +64,11 @@ from culture_workflow import (
     get_model_id,
     run_workflow,
 )
+from supabase.culture_db import (
+    culture_db_backend,
+    culture_db_configured,
+    get_culture_db_url,
+)
 from supabase.members_auth import authenticate_member
 from supabase.members_setup import setup_members
 from supabase.table_config import (
@@ -71,10 +76,8 @@ from supabase.table_config import (
     TABLE_NAME,
     inst1_schema_table_display_items,
 )
-from supabase.tshdeoa01_setup import ensure_tshdeoa01_table
-from supabase.tshdeoa02_setup import ensure_tshdeoa02_table
-from supabase.tshdeoa04_setup import ensure_tshdeoa04_table
-from supabase.tshde0zcd_setup import ensure_tshde0zcd_table
+from supabase.aurora_setup import ensure_tshde0zcd_table as ensure_tshde0zcd_table_aurora
+from supabase.aurora_setup import ensure_tshdeoa_tables
 
 PUBLIC_ENDPOINTS = frozenset(
     {
@@ -100,17 +103,12 @@ def get_db_url() -> str:
     global _db_url_cache
     if _db_url_cache is not None:
         return _db_url_cache
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-    if not raw:
-        raise RuntimeError("`SUPABASE_DB_URL` 환경 변수를 설정해야 합니다.")
-    if "sslmode=" not in raw:
-        raw = raw + ("&" if "?" in raw else "?") + "sslmode=require"
-    _db_url_cache = raw
+    _db_url_cache = get_culture_db_url()
     return _db_url_cache
 
 
-def supabase_configured() -> bool:
-    return bool(os.environ.get("SUPABASE_DB_URL", "").strip())
+def db_configured() -> bool:
+    return culture_db_configured()
 
 
 app = Flask(__name__)
@@ -183,7 +181,7 @@ def require_login():
 
 
 @app.before_request
-def ensure_supabase_tables_ready():
+def ensure_db_tables_ready():
     global _tchdhc001_initialized, _members_initialized
     global _tshdeoa01_initialized, _tshdeoa02_initialized, _tshdeoa04_initialized, _tshde0zcd_initialized
     if request.endpoint in ("api_health", "static_files"):
@@ -194,7 +192,7 @@ def ensure_supabase_tables_ready():
         return
     if os.environ.get("VERCEL"):
         return
-    if not supabase_configured():
+    if not db_configured():
         return
     if (
         _tchdhc001_initialized
@@ -224,20 +222,16 @@ def ensure_supabase_tables_ready():
                     setup_members(conn, seed=True, force_seed=False)
                     _members_initialized = True
                 if not _tshdeoa01_initialized:
-                    ensure_tshdeoa01_table(conn)
+                    ensure_tshdeoa_tables(conn)
                     _tshdeoa01_initialized = True
-                if not _tshdeoa02_initialized:
-                    ensure_tshdeoa02_table(conn)
                     _tshdeoa02_initialized = True
-                if not _tshdeoa04_initialized:
-                    ensure_tshdeoa04_table(conn)
                     _tshdeoa04_initialized = True
                 if not _tshde0zcd_initialized:
-                    ensure_tshde0zcd_table(conn)
+                    ensure_tshde0zcd_table_aurora(conn)
                     _tshde0zcd_initialized = True
                 conn.commit()
         except Exception:
-            app.logger.exception("Supabase 테이블 초기화 실패")
+            app.logger.exception("DB 테이블 초기화 실패")
             raise
 
 
@@ -273,7 +267,9 @@ def add_no_cache_headers(response):
 
 
 def get_conn():
-    return psycopg2.connect(get_db_url(), connect_timeout=15)
+    from supabase.culture_db import connect_culture_db
+
+    return connect_culture_db(connect_timeout=15)
 
 
 def ensure_tchdhc001_table(conn) -> None:
@@ -325,6 +321,7 @@ def run_chat(
     list[str],
     str,
     str,
+    str,
 ]:
     """LangGraph Executor로 질문 분석 → INST1 추출/일반 대화 → 응답 실행."""
     final = run_workflow(
@@ -355,6 +352,7 @@ def run_chat(
     excel_export = mask_excel_export_for_display(dict(final.get("excel_export") or {}))
     report_export = _client_report_export(dict(final.get("report_export") or {}))
     chart_available = _chart_available_from_final(final)
+    schema_pipeline_notice = (final.get("schema_pipeline_notice") or "").strip()
     return (
         reply,
         notice,
@@ -371,6 +369,7 @@ def run_chat(
         aggregate_column_options,
         aggregate_column_label,
         aggregate_column_pick_mode,
+        schema_pipeline_notice,
     )
 
 
@@ -785,6 +784,16 @@ PAGE = """
     }
     .btn-secondary:hover { background: var(--kb-brown-dark); }
     .notice { color: var(--kb-brown-darker); font-size: 14px; margin-top: 8px; font-weight: 700; }
+    .schema-pipeline-notice {
+      font-size: 13px;
+      line-height: 1.55;
+      color: #3d5a3a;
+      background: rgba(76, 120, 68, 0.08);
+      border-left: 3px solid #4c7844;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+      border-radius: 6px;
+    }
     .msg.assistant.streaming { border-color: rgba(255, 204, 0, 0.5); }
     .msg.assistant.generating .msg-text {
       color: var(--kb-text-secondary);
@@ -1035,7 +1044,7 @@ PAGE = """
       <div class="main-alerts">
         {% if not db_configured %}
         <div class="banner banner-warn">
-          <strong>DB 미연결:</strong> <code>SUPABASE_DB_URL</code> 설정 시 요약이 동작합니다.
+          <strong>DB 미연결:</strong> <code>AURORA_DB_URL</code> 설정이 필요합니다.
         </div>
         {% endif %}
         {% if not aws_configured %}
@@ -1066,7 +1075,7 @@ PAGE = """
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="/static/culture_chat.js?v=47"></script>
+  <script src="/static/culture_chat.js?v=50"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
@@ -1225,6 +1234,7 @@ def chat_api():
             aggregate_column_options,
             aggregate_column_label,
             aggregate_column_pick_mode,
+            schema_pipeline_notice,
         ) = run_chat(
             raw, history, table_name=table_name
         )
@@ -1247,6 +1257,7 @@ def chat_api():
                 "excel_export": excel_export,
                 "report_export": report_export,
                 "chart_available": chart_available,
+                "schema_pipeline_notice": schema_pipeline_notice,
             }
         )
         session["chat_history"] = history
@@ -1256,6 +1267,7 @@ def chat_api():
                 "ok": True,
                 "reply": reply,
                 "notice": notice or "",
+                "schema_pipeline_notice": schema_pipeline_notice,
                 "charts": charts,
                 "pdf_url": pdf_url,
                 "inst1_data": inst1_data,
@@ -1282,7 +1294,7 @@ def chat_api():
 def _ensure_members_for_login() -> None:
     """로그인 전 회원 테이블만 준비 (실패해도 로그인 화면은 유지)."""
     global _members_initialized
-    if _members_initialized or not supabase_configured():
+    if _members_initialized or not db_configured():
         return
     if os.environ.get("VERCEL"):
         return
@@ -1317,9 +1329,9 @@ def login():
             next_url=next_url,
         ), 400
 
-    if not supabase_configured():
+    if not db_configured():
         return render_login_page(
-            error="회원 DB(SUPABASE_DB_URL)가 설정되지 않았습니다.",
+            error="회원 DB(AURORA_DB_URL)가 설정되지 않았습니다.",
             next_url=next_url,
         ), 503
 
@@ -1329,8 +1341,28 @@ def login():
             member = authenticate_member(conn, member_id, password)
     except Exception as e:
         app.logger.exception("로그인 DB 오류")
+        detail = str(e).strip()
+        if len(detail) > 120:
+            detail = detail[:117] + "..."
+        if "connection to database not available" in detail.lower():
+            user_msg = (
+                "회원 DB(Aurora)에 연결할 수 없습니다. "
+                "AURORA_DB_URL과 네트워크/보안 그룹 설정을 확인하세요."
+            )
+        elif os.environ.get("VERCEL") and "timeout" in detail.lower():
+            user_msg = (
+                "회원 DB 연결 시간이 초과되었습니다. "
+                "Aurora 보안 그룹에 Vercel 접속 IP 허용이 필요할 수 있습니다."
+            )
+        else:
+            hint = (
+                f" ({detail})"
+                if os.environ.get("CULTURE_DEBUG") == "1" and detail
+                else ""
+            )
+            user_msg = f"로그인 처리 중 오류: {type(e).__name__}{hint}"
         return render_login_page(
-            error=f"로그인 처리 중 오류: {type(e).__name__}",
+            error=user_msg,
             next_url=next_url,
         ), 500
 
@@ -1401,7 +1433,7 @@ def index():
         chat_history=[],
         table_name=TABLE_NAME,
         inst1_tables=inst1_schema_table_display_items(),
-        db_configured=supabase_configured(),
+        db_configured=db_configured(),
         aws_configured=aws_credentials_configured(),
         member=current_member(),
     )
@@ -1443,10 +1475,22 @@ def chat_stream():
                 "pending_chart": session.get("pending_chart") or {},
                 "chart_specs": [],
                 "chart_available": False,
+                "schema_pipeline_notice": "",
             }
             final: dict[str, Any] = {}
             for chunk in executor.stream(initial, stream_mode="updates"):
                 for node_name, update in chunk.items():
+                    if node_name == "analyze" and isinstance(update, dict):
+                        pipe_notice = (update.get("schema_pipeline_notice") or "").strip()
+                        if pipe_notice:
+                            yield _sse_event(
+                                {
+                                    "type": "status",
+                                    "text": pipe_notice,
+                                    "schema_pipeline": True,
+                                }
+                            )
+                            yield _sse_pad()
                     yield _sse_event(build_workflow_status_event(node_name))
                     yield _sse_pad()
                     if isinstance(update, dict):
@@ -1459,6 +1503,7 @@ def chat_stream():
             if not full_text:
                 full_text = "(모델이 빈 응답을 반환했습니다.)"
             notice = final.get("notice") or ""
+            schema_pipeline_notice = (final.get("schema_pipeline_notice") or "").strip()
             charts = list(final.get("chart_specs") or [])
             pdf_url = (final.get("pdf_url") or "").strip()
             inst1_data = mask_inst1_data_for_display(dict(final.get("inst1_data") or {}))
@@ -1493,6 +1538,7 @@ def chat_stream():
                     "excel_export": excel_export,
                     "report_export": report_export,
                     "chart_available": chart_available,
+                    "schema_pipeline_notice": schema_pipeline_notice,
                 }
             )
             session["chat_history"] = history
@@ -1504,6 +1550,7 @@ def chat_stream():
                     "type": "done",
                     "text": full_text,
                     "notice": notice,
+                    "schema_pipeline_notice": schema_pipeline_notice,
                     "charts": charts,
                     "pdf_url": pdf_url,
                     "inst1_data": inst1_data,
@@ -1548,7 +1595,8 @@ def api_health():
     out: dict = {
         "ok": True,
         "app": "culture",
-        "has_supabase_url": supabase_configured(),
+        "has_db_url": db_configured(),
+        "db_backend": culture_db_backend(),
         "aws_ready_for_bedrock": aws_credentials_configured(),
         "has_aws_session_token": aws_session_token_configured(),
         "aws_session_token_env": aws_session_token_env_name(),
@@ -1570,7 +1618,15 @@ def api_health():
         "s3_configured": s3_configured(),
         "member_table": MEMBER_TABLE_NAME,
     }
-    if supabase_configured():
+    try:
+        from schema_vector.config import opensearch_index, schema_vector_enabled
+
+        out["schema_vector_enabled"] = schema_vector_enabled()
+        if schema_vector_enabled():
+            out["opensearch_index"] = opensearch_index()
+    except Exception:
+        out["schema_vector_enabled"] = False
+    if db_configured():
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -1579,7 +1635,7 @@ def api_health():
         except Exception as e:
             out["member_count"] = None
             out["member_error"] = f"{type(e).__name__}: {e}"
-    if request.args.get("db") == "1" and supabase_configured():
+    if request.args.get("db") == "1" and db_configured():
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:

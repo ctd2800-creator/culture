@@ -1,4 +1,4 @@
-"""Apply supabase/tshdeoa04.sql using SUPABASE_DB_URL."""
+"""Apply supabase/tshdeoa04.sql using AURORA_DB_URL."""
 from __future__ import annotations
 
 import os
@@ -38,13 +38,9 @@ def _read_windows_env(name: str) -> str:
 
 
 def db_url() -> str:
-    _load_dotenv()
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip() or _read_windows_env("SUPABASE_DB_URL")
-    if not raw:
-        raise SystemExit("SUPABASE_DB_URL 환경 변수가 없습니다.")
-    if "sslmode=" not in raw:
-        raw += ("&" if "?" in raw else "?") + "sslmode=require"
-    return raw
+    sys.path.insert(0, str(ROOT))
+    from supabase.db_util import get_db_url
+    return get_db_url()
 
 
 def main() -> None:

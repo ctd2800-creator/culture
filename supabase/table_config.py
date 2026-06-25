@@ -1,4 +1,4 @@
-"""Supabase public 테이블명 (한글 식별자)."""
+"""INST1/public 테이블명 (한글 식별자)."""
 
 TABLE_NAME = "그룹멤버십계열사기초데이터검증"
 TABLE_PK_CONSTRAINT = f"{TABLE_NAME}_pkey"

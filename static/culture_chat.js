@@ -93,6 +93,20 @@ window.CultureChat = {
       messageInput.focus();
     }
 
+    function renderSchemaPipelineNotice(container, text) {
+      if (!text || !String(text).trim()) return;
+      if (container.querySelector(".schema-pipeline-notice")) return;
+      const el = document.createElement("div");
+      el.className = "schema-pipeline-notice";
+      el.textContent = String(text).trim();
+      const textEl = container.querySelector(".msg-text");
+      if (textEl) {
+        container.insertBefore(el, textEl);
+      } else {
+        container.appendChild(el);
+      }
+    }
+
     function renderAggregateColumnOptions(container, columns, label, pickMode) {
       let onPick = appendToMessageInput;
       if (pickMode === "replace") {
@@ -319,8 +333,39 @@ window.CultureChat = {
       return col === CUSTOMER_ID_COLUMN || col.endsWith("고객식별자");
     }
 
+    function isCodeLikeColumn(column) {
+      const col = String(column || "").trim();
+      if (!col || isCustomerIdColumn(col)) return true;
+      if (col === "기준년월" || col === "그룹회사코드") return true;
+      if (col.includes("년월일")) return true;
+      if (col.endsWith("코드") || col.endsWith("구분") || col.endsWith("여부") || col.endsWith("등급")) {
+        return true;
+      }
+      return false;
+    }
+
+    function isNumericCellValue(value) {
+      if (value === null || value === undefined || value === "") return false;
+      if (typeof value === "number") return Number.isFinite(value);
+      const s = String(value).trim();
+      return /^-?\d+(\.\d+)?$/.test(s);
+    }
+
+    function formatNumericDisplay(value) {
+      const n = typeof value === "number" ? value : Number(String(value).trim());
+      if (!Number.isFinite(n)) return null;
+      if (Number.isInteger(n)) {
+        return n.toLocaleString("ko-KR");
+      }
+      return n.toLocaleString("ko-KR", { maximumFractionDigits: 4 });
+    }
+
     function displayCellValue(column, value) {
       if (isCustomerIdColumn(column)) return maskCustomerId(value);
+      if (!isCodeLikeColumn(column) && isNumericCellValue(value)) {
+        const formatted = formatNumericDisplay(value);
+        if (formatted !== null) return formatted;
+      }
       return value === null || value === undefined ? "" : String(value);
     }
 
@@ -685,7 +730,8 @@ window.CultureChat = {
       chartAvailable,
       aggregateColumnOptions,
       aggregateColumnLabel,
-      aggregateColumnPickMode
+      aggregateColumnPickMode,
+      schemaPipelineNotice
     ) {
       clearHint();
       const el = document.createElement("div");
@@ -695,6 +741,9 @@ window.CultureChat = {
       const followUp = resolveFollowUpQuestions(content, followUpQuestions);
       textEl.textContent = followUp.displayContent;
       el.appendChild(textEl);
+      if (role === "assistant" && schemaPipelineNotice) {
+        renderSchemaPipelineNotice(el, schemaPipelineNotice);
+      }
       if (role === "assistant" && charts && charts.length) {
         renderCharts(el, charts);
       }
@@ -761,7 +810,8 @@ window.CultureChat = {
           item.chart_available || false,
           item.aggregate_column_options || [],
           item.aggregate_column_label || "",
-          item.aggregate_column_pick_mode || "append"
+          item.aggregate_column_pick_mode || "append",
+          item.schema_pipeline_notice || ""
         )
       );
     }
@@ -778,6 +828,9 @@ window.CultureChat = {
         }
         if (payload.type === "status") {
           showGeneratingStatus(state, payload);
+          if (payload.schema_pipeline || (payload.text || "").indexOf("[데이터 사전]") >= 0) {
+            renderSchemaPipelineNotice(state.el, payload.text);
+          }
         } else if (payload.type === "chunk") {
           finishGenerating(state);
           state.full += payload.text || "";
@@ -827,6 +880,9 @@ window.CultureChat = {
               payload.aggregate_column_label,
               payload.aggregate_column_pick_mode
             );
+          }
+          if (payload.schema_pipeline_notice) {
+            renderSchemaPipelineNotice(state.el, payload.schema_pipeline_notice);
           }
           if (payload.notice) {
             chatNotice.textContent = payload.notice;
@@ -926,6 +982,9 @@ window.CultureChat = {
             data.aggregate_column_pick_mode
           );
         }
+        if (data.schema_pipeline_notice) {
+          renderSchemaPipelineNotice(state.el, data.schema_pipeline_notice);
+        }
         if (data.notice) {
           chatNotice.textContent = data.notice;
           chatNotice.style.display = "block";
@@ -998,9 +1057,6 @@ window.CultureChat = {
         chip.addEventListener("click", () => {
           const fillText = chip.dataset.fillText || chip.textContent;
           fillMessageInput(fillText);
-          if (chip.classList.contains("table-chip")) {
-            sendMessage();
-          }
         });
         chip.addEventListener("keydown", (e) => {
           if (e.key === "Enter" || e.key === " ") {

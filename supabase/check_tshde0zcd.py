@@ -20,9 +20,9 @@ def _load_dotenv() -> None:
 
 def main() -> int:
     _load_dotenv()
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip()
+    raw = os.environ.get("AURORA_DB_URL", "").strip()
     if not raw:
-        print("ERROR: SUPABASE_DB_URL 없음")
+        print("ERROR: AURORA_DB_URL 없음")
         return 1
     if "sslmode=" not in raw:
         raw += ("&" if "?" in raw else "?") + "sslmode=require"

@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OpenSearchDomainAdmin",
+      "Effect": "Allow",
+      "Action": [
+        "es:CreateDomain",
+        "es:DeleteDomain",
+        "es:DescribeDomain",
+        "es:DescribeDomains",
+        "es:ListDomainNames",
+        "es:UpdateDomainConfig",
+        "es:ListTags",
+        "es:AddTags",
+        "es:RemoveTags"
+      ],
+      "Resource": "arn:aws:es:ap-northeast-2:956723945403:domain/*"
+    },
+    {
+      "Sid": "OpenSearchHttpCultureSchema",
+      "Effect": "Allow",
+      "Action": "es:ESHttp*",
+      "Resource": "arn:aws:es:ap-northeast-2:956723945403:domain/culture-schema/*"
+    }
+  ]
+}

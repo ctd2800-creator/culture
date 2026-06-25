@@ -318,19 +318,13 @@ ALL_ROWS_HINTS: tuple[str, ...] = (
     "all rows",
 )
 
+from supabase.culture_db import connect_culture_db
+
 _db_url_cache: str | None = None
 
 
 def get_conn():
-    global _db_url_cache
-    if _db_url_cache is None:
-        raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-        if not raw:
-            raise RuntimeError("`SUPABASE_DB_URL` 환경 변수를 설정해야 합니다.")
-        if "sslmode=" not in raw:
-            raw += ("&" if "?" in raw else "?") + "sslmode=require"
-        _db_url_cache = raw
-    return psycopg2.connect(_db_url_cache, connect_timeout=15)
+    return connect_culture_db(connect_timeout=15)
 
 
 def _wants_all_rows(message: str) -> bool:
@@ -1959,6 +1953,7 @@ def analyze_question(
     bedrock_ask=None,
     pending_aggregate: dict[str, Any] | None = None,
     pending_chart: dict[str, Any] | None = None,
+    schema_context: str | None = None,
 ) -> dict[str, Any]:
     """질문 분석 에이전트 — intent·테이블·필터 추출."""
     ruled = _rule_based_analysis(
@@ -1977,10 +1972,13 @@ def analyze_question(
             "customer_id": None,
             "reason": "일반 대화로 분류",
         }
+    user_content = message
+    if schema_context:
+        user_content = f"{message}\n\n[스키마 검색 힌트]\n{schema_context}"
     try:
         raw = bedrock_ask(
             ANALYZE_SYSTEM_PROMPT,
-            [{"role": "user", "content": message}],
+            [{"role": "user", "content": user_content}],
             512,
         )
         start = raw.find("{")

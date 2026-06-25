@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from supabase.table_config import TSHDEOA02_SCHEMA, TSHDEOA02_TABLE
-from supabase.tshdeoa01_seed import TSHDEOA01_202604_TARGET_COUNT, TSHDEOA01_ROWS_202604
+from supabase.tshdeoa01_seed import (
+    TSHDEOA01_EAGER_MATERIALIZE_LIMIT,
+    TSHDEOA01_LINKED_MONTH_COUNT,
+    TSHDEOA01_ROWS_202604,
+    TSHDEOA01_SAMPLE_ROWS,
+    TSHDEOA01_SEED_MONTHS,
+    SOURCE_MONTH,
+    iter_rows_from_templates,
+)
 
 # 기준년월, 그룹회사코드, 그룹고객식별자, 최초거래, 최근거래, 거래기간, 창구, 비대면,
 # 최고수신, 최고여신, 수신잔액, 여신잔액, 보유수신, 보유여신, 신규, 해지, 급여, 연금
@@ -44,7 +54,8 @@ TSHDEOA02_SAMPLE_ROWS: list[tuple] = [
 TSHDEOA02_ROWS = TSHDEOA02_SAMPLE_ROWS
 
 SOURCE_MONTH = "202604"
-TSHDEOA02_202604_TARGET_COUNT = TSHDEOA01_202604_TARGET_COUNT
+TSHDEOA02_202604_TARGET_COUNT = TSHDEOA01_LINKED_MONTH_COUNT
+TSHDEOA02_SEED_MONTHS = TSHDEOA01_SEED_MONTHS
 
 
 def _vary_o02_attrs(attrs: list, i: int) -> list:
@@ -61,6 +72,44 @@ def _vary_o02_attrs(attrs: list, i: int) -> list:
         base = int(out[j])
         out[j] = max(0, min(10, base + ((i % 3) - 1)))
     return out
+
+
+def _o02_attrs_for_customer(i: int, customer_id: str) -> list:
+    template_by_cid = {str(row[2]).strip(): row for row in TSHDEOA02_SAMPLE_ROWS}
+    if customer_id in template_by_cid:
+        _, _, _, *attrs = template_by_cid[customer_id]
+        return list(attrs)
+    _, _, _, *attrs = TSHDEOA02_SAMPLE_ROWS[i % len(TSHDEOA02_SAMPLE_ROWS)]
+    return _vary_o02_attrs(list(attrs), i)
+
+
+def iter_o02_rows_202604(
+    *,
+    count: int = TSHDEOA02_202604_TARGET_COUNT,
+) -> Iterator[tuple]:
+    """TSHDEOA01 고객식별자 기준 TSHDEOA02 202604 행 스트리밍 생성."""
+    for i, o01_row in enumerate(
+        iter_rows_from_templates(
+            TSHDEOA01_SAMPLE_ROWS,
+            month=SOURCE_MONTH,
+            count=count,
+        )
+    ):
+        _, grp, customer_id, *_ = o01_row
+        customer_id = str(customer_id).strip()
+        row_attrs = _o02_attrs_for_customer(i, customer_id)
+        yield (SOURCE_MONTH, grp, customer_id, *row_attrs)
+
+
+def iter_all_o02_seed_rows(
+    *,
+    count: int = TSHDEOA02_202604_TARGET_COUNT,
+    months: tuple[str, ...] = TSHDEOA02_SEED_MONTHS,
+) -> Iterator[tuple]:
+    for row in iter_o02_rows_202604(count=count):
+        tail = row[1:]
+        for month in months:
+            yield (month, *tail)
 
 
 def expand_o02_rows_from_o01_customers(
@@ -104,18 +153,28 @@ def derive_rows_for_month(rows: list[tuple], month: str) -> list[tuple]:
     return [(month,) + row[1:] for row in rows]
 
 
-TSHDEOA02_ROWS_202604 = expand_o02_rows_from_o01_customers(
-    TSHDEOA02_SAMPLE_ROWS,
-    TSHDEOA01_ROWS_202604,
-    month=SOURCE_MONTH,
-)
-TSHDEOA02_ROWS_202603 = derive_rows_for_month(TSHDEOA02_ROWS_202604, "202603")
-TSHDEOA02_ROWS_202602 = derive_rows_for_month(TSHDEOA02_ROWS_202604, "202602")
-TSHDEOA02_ALL_ROWS: list[tuple] = (
-    TSHDEOA02_ROWS_202604 + TSHDEOA02_ROWS_202603 + TSHDEOA02_ROWS_202602
-)
+if (
+    TSHDEOA02_202604_TARGET_COUNT <= TSHDEOA01_EAGER_MATERIALIZE_LIMIT
+    and TSHDEOA01_ROWS_202604
+    and len(TSHDEOA01_ROWS_202604) == TSHDEOA02_202604_TARGET_COUNT
+):
+    TSHDEOA02_ROWS_202604 = expand_o02_rows_from_o01_customers(
+        TSHDEOA02_SAMPLE_ROWS,
+        TSHDEOA01_ROWS_202604,
+        month=SOURCE_MONTH,
+    )
+    TSHDEOA02_ROWS_202603 = derive_rows_for_month(TSHDEOA02_ROWS_202604, "202603")
+    TSHDEOA02_ROWS_202602 = derive_rows_for_month(TSHDEOA02_ROWS_202604, "202602")
+    TSHDEOA02_ALL_ROWS: list[tuple] = (
+        TSHDEOA02_ROWS_202604 + TSHDEOA02_ROWS_202603 + TSHDEOA02_ROWS_202602
+    )
+else:
+    TSHDEOA02_ROWS_202604 = []
+    TSHDEOA02_ROWS_202603 = []
+    TSHDEOA02_ROWS_202602 = []
+    TSHDEOA02_ALL_ROWS = []
 
-TSHDEOA02_UPSERT_SQL = f"""
+TSHDEOA02_INSERT_SQL = f"""
 INSERT INTO "{TSHDEOA02_SCHEMA}"."{TSHDEOA02_TABLE}" (
   "기준년월", "그룹회사코드", "그룹고객식별자",
   "그룹최초거래년월일", "그룹최근거래년월일", "거래기간구분",
@@ -127,6 +186,10 @@ INSERT INTO "{TSHDEOA02_SCHEMA}"."{TSHDEOA02_TABLE}" (
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 )
+"""
+
+TSHDEOA02_UPSERT_SQL = f"""
+{TSHDEOA02_INSERT_SQL.rstrip()}
 ON CONFLICT ("기준년월", "그룹회사코드", "그룹고객식별자") DO UPDATE SET
   "그룹최초거래년월일" = EXCLUDED."그룹최초거래년월일",
   "그룹최근거래년월일" = EXCLUDED."그룹최근거래년월일",

@@ -93,6 +93,7 @@ class CultureState(TypedDict, total=False):
     aggregate_column_label: str
     aggregate_column_pick_mode: str
     chart_available: bool
+    schema_pipeline_notice: str
 
 
 _graph_executor = None
@@ -410,13 +411,35 @@ def ask_bedrock(system: str, messages: list[dict], max_tokens: int = 2048) -> st
 def analyze_question_node(state: CultureState) -> dict[str, Any]:
     """질문 분석 에이전트 — INST1 추출 vs 테이블 추천 vs 일반 대화."""
     msg = state.get("user_message", "")
+    schema_context = ""
+    schema_pipeline_notice = ""
+    try:
+        from schema_vector.config import schema_vector_enabled
+        from schema_vector.retriever import (
+            build_schema_pipeline_notice,
+            hits_to_schema_context,
+            search_schema,
+        )
+
+        if schema_vector_enabled():
+            hits = search_schema(msg, k=6)
+            schema_context = hits_to_schema_context(hits)
+            schema_pipeline_notice = build_schema_pipeline_notice(msg, hits)
+    except Exception:
+        logging.getLogger(__name__).debug("schema vector search skipped", exc_info=True)
     analysis = analyze_question(
         msg,
         bedrock_ask=ask_bedrock,
         pending_aggregate=state.get("pending_aggregate") or None,
         pending_chart=state.get("pending_chart") or None,
+        schema_context=schema_context or None,
     )
-    return {"question_analysis": analysis}
+    out: dict[str, Any] = {"question_analysis": analysis}
+    if schema_context:
+        out["schema_search_context"] = schema_context
+    if schema_pipeline_notice:
+        out["schema_pipeline_notice"] = schema_pipeline_notice
+    return out
 
 
 def table_prompt_node(state: CultureState) -> dict[str, Any]:
@@ -552,6 +575,7 @@ def fetch_inst1_node(state: CultureState) -> dict[str, Any]:
         "month": result.get("month", ""),
         "extract_tables": list((result.get("inst1_data") or {}).keys()),
         "notice": "; ".join(result.get("errors") or []) or "",
+        "schema_pipeline_notice": state.get("schema_pipeline_notice") or "",
     }
 
 
@@ -643,11 +667,13 @@ def reply_node(state: CultureState) -> dict[str, Any]:
     aggregate_label = (state.get("aggregate_column_label") or "").strip()
     aggregate_pick_mode = (state.get("aggregate_column_pick_mode") or "append").strip()
     chart_available = bool(state.get("chart_available"))
+    schema_pipeline_notice = (state.get("schema_pipeline_notice") or "").strip()
     if preset:
         return {
             "reply": preset,
             "summary": summary or preset,
             "notice": (state.get("notice") or "").strip(),
+            "schema_pipeline_notice": schema_pipeline_notice,
             "chart_specs": charts,
             "excel_export": excel_export,
             "report_export": report_export,
@@ -662,6 +688,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
             "reply": "(응답이 비어 있습니다.)",
             "summary": "",
             "notice": "",
+            "schema_pipeline_notice": schema_pipeline_notice,
             "chart_specs": charts,
             "excel_export": excel_export,
             "report_export": report_export,
@@ -675,6 +702,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
         "reply": summary,
         "summary": summary,
         "notice": (state.get("notice") or "").strip(),
+        "schema_pipeline_notice": schema_pipeline_notice,
         "chart_specs": charts,
         "excel_export": excel_export,
         "report_export": report_export,
@@ -772,6 +800,7 @@ def run_workflow(
         "aggregate_column_label": "",
         "aggregate_column_pick_mode": "append",
         "chart_available": False,
+        "schema_pipeline_notice": "",
     }
     try:
         return get_executor().invoke(initial)

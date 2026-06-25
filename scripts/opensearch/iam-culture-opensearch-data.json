@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OpenSearchHttpCultureSchema",
+      "Effect": "Allow",
+      "Action": "es:ESHttp*",
+      "Resource": "arn:aws:es:ap-northeast-2:956723945403:domain/culture-schema/*"
+    },
+    {
+      "Sid": "OpenSearchDescribeDomain",
+      "Effect": "Allow",
+      "Action": [
+        "es:DescribeDomain",
+        "es:ListDomainNames"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

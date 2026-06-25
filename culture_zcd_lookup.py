@@ -13,15 +13,16 @@ from supabase.table_config import (
     TSHDE0ZCD_TABLE,
 )
 
-_db_url_cache: str | None = None
+from supabase.culture_db import connect_culture_db
 
-# 시드 데이터 기본 그룹회사 (KFG 조회 시 K00 코드도 함께 사용)
 _FALLBACK_GROUP_CODES = ("K00", "KFG", "KB0", "KC0")
 
 _lookup_cache: dict[str, dict[tuple[str, str], str]] = {}
 _group_company_lookup_cache: dict[str, str] | None = None
 
 GROUP_COMPANY_INSTANCE_ID = "0036"
+
+_db_url_cache: str | None = None
 
 
 def _normalize_instance_code(column: str, value: Any) -> str:
@@ -40,15 +41,7 @@ def _normalize_instance_code(column: str, value: Any) -> str:
 
 
 def _get_conn():
-    global _db_url_cache
-    if _db_url_cache is None:
-        raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-        if not raw:
-            raise RuntimeError("`SUPABASE_DB_URL` 환경 변수를 설정해야 합니다.")
-        if "sslmode=" not in raw:
-            raw += ("&" if "?" in raw else "?") + "sslmode=require"
-        _db_url_cache = raw
-    return psycopg2.connect(_db_url_cache, connect_timeout=15)
+    return connect_culture_db(connect_timeout=15)
 
 
 def clear_lookup_cache() -> None:

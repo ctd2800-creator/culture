@@ -1,7 +1,7 @@
 [project]
 name = "culture"
 version = "1.0.0"
-description = "Supabase 데이터 요약 + LangGraph + Amazon Bedrock"
+description = "Aurora PostgreSQL 데이터 요약 + LangGraph + Amazon Bedrock"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,8 @@ dependencies = [
     "fpdf2>=2.8.0",
     "matplotlib>=3.8.0",
     "openpyxl>=3.1.0",
+    "opensearch-py>=2.4.0",
+    "requests-aws4auth>=1.2.3",
 ]
 
 [tool.vercel]

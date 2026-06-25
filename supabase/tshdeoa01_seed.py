@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
+
 from supabase.table_config import TSHDEOA01_SCHEMA, TSHDEOA01_TABLE
 
 # 기준년월, 그룹회사코드, 그룹고객식별자, 당월, 활동, 핵심, 성별, 연령, 본인등급, 최고등급, 개인사업자, 직장인, PB, 외국인
-TSHDEOA01_SAMPLE_ROWS: list[tuple] = [    ("202604", "KFG", "1446565238", 2, 2, 1, "1", "031", "9", "5", "0", "0", "0", "0"),
+TSHDEOA01_SAMPLE_ROWS: list[tuple] = [
+    ("202604", "KFG", "1446565238", 2, 2, 1, "1", "031", "9", "5", "0", "0", "0", "0"),
     ("202604", "KFG", "1236450213", 2, 1, 0, "1", "033", "9", "9", "0", "1", "0", "0"),
     ("202604", "KFG", "1342475439", 4, 2, 1, "2", "047", "5", "5", "0", "0", "0", "0"),
     ("202604", "KFG", "1038131315", 2, 1, 0, "1", "031", "5", "5", "0", "0", "0", "0"),
@@ -41,7 +45,56 @@ TSHDEOA01_SAMPLE_ROWS: list[tuple] = [    ("202604", "KFG", "1446565238", 2, 2, 
 TSHDEOA01_ROWS = TSHDEOA01_SAMPLE_ROWS
 
 SOURCE_MONTH = "202604"
-TSHDEOA01_202604_TARGET_COUNT = 970
+TSHDEOA01_202604_TARGET_COUNT = 300_000
+# TSHDEOA01 DB 적재 건수 — 연계 테이블(TSHDEOA02/04) 시드 기준
+TSHDEOA01_LINKED_MONTH_COUNT = 300_000
+TSHDEOA01_SEED_MONTHS: tuple[str, ...] = ("202602", "202603", "202604")
+# 메모리에 전건 적재 가능한 상한 (연계 테이블 시드용)
+TSHDEOA01_EAGER_MATERIALIZE_LIMIT = 100_000
+_GENERATED_ID_BASE = 3_000_000_000
+
+
+def _vary_attrs(attrs: list[Any], i: int) -> list[Any]:
+    out = list(attrs)
+    off = i % 3
+    out[0] = max(1, min(4, int(out[0]) + (off - 1)))
+    out[1] = max(0, min(4, int(out[1]) + (off - 1)))
+    out[2] = max(0, min(2, int(out[2]) + (1 if i % 7 == 0 else 0)))
+    return out
+
+
+def _customer_id_for_index(templates: list[tuple], i: int) -> str:
+    template_len = len(templates)
+    if i < template_len:
+        return str(templates[i][2]).strip()
+    return f"{_GENERATED_ID_BASE + (i - template_len):010d}"
+
+
+def iter_rows_from_templates(
+    templates: list[tuple],
+    *,
+    month: str,
+    count: int,
+) -> Iterator[tuple]:
+    """샘플 행을 순환 참조해 count건 생성. 그룹고객식별자는 전건 유일."""
+    if count < len(templates):
+        raise ValueError(f"count({count})는 샘플 수({len(templates)}) 이상이어야 합니다.")
+
+    template_len = len(templates)
+    sample_ids = {str(t[2]).strip() for t in templates}
+    if len(sample_ids) != template_len:
+        raise ValueError("샘플 그룹고객식별자에 중복이 있습니다.")
+
+    for i in range(count):
+        _, grp, _, *template_attrs = templates[i % template_len]
+        customer_id = _customer_id_for_index(templates, i)
+
+        if i < template_len:
+            row_attrs = list(template_attrs)
+        else:
+            row_attrs = _vary_attrs(list(template_attrs), i)
+
+        yield (month, grp, customer_id, *row_attrs)
 
 
 def expand_rows_from_templates(
@@ -50,36 +103,7 @@ def expand_rows_from_templates(
     month: str,
     count: int,
 ) -> list[tuple]:
-    """샘플 행을 순환 참조해 count건 생성. 그룹고객식별자는 전건 유일."""
-    if count < len(templates):
-        raise ValueError(f"count({count})는 샘플 수({len(templates)}) 이상이어야 합니다.")
-
-    used_ids: set[str] = set()
-    rows: list[tuple] = []
-
-    for i in range(count):
-        yyyymm, grp, template_cid, *attrs = templates[i % len(templates)]
-        if i < len(templates):
-            customer_id = str(template_cid).strip()
-            row_attrs = list(attrs)
-        else:
-            seq = 970_000_0000 + i
-            customer_id = str(seq)
-            while customer_id in used_ids:
-                seq += 1
-                customer_id = str(seq)
-            row_attrs = list(attrs)
-            off = i % 3
-            row_attrs[0] = max(1, min(4, int(row_attrs[0]) + (off - 1)))
-            row_attrs[1] = max(0, min(4, int(row_attrs[1]) + (off - 1)))
-            row_attrs[2] = max(0, min(2, int(row_attrs[2]) + (1 if i % 7 == 0 else 0)))
-
-        if customer_id in used_ids:
-            raise ValueError(f"중복 고객식별자: {customer_id}")
-        used_ids.add(customer_id)
-        rows.append((month, grp, customer_id, *row_attrs))
-
-    return rows
+    return list(iter_rows_from_templates(templates, month=month, count=count))
 
 
 def derive_rows_for_month(rows: list[tuple], month: str) -> list[tuple]:
@@ -87,18 +111,42 @@ def derive_rows_for_month(rows: list[tuple], month: str) -> list[tuple]:
     return [(month,) + row[1:] for row in rows]
 
 
-TSHDEOA01_ROWS_202604 = expand_rows_from_templates(
-    TSHDEOA01_SAMPLE_ROWS,
-    month=SOURCE_MONTH,
-    count=TSHDEOA01_202604_TARGET_COUNT,
-)
-TSHDEOA01_ROWS_202603 = derive_rows_for_month(TSHDEOA01_ROWS_202604, "202603")
-TSHDEOA01_ROWS_202602 = derive_rows_for_month(TSHDEOA01_ROWS_202604, "202602")
-TSHDEOA01_ALL_ROWS: list[tuple] = (
-    TSHDEOA01_ROWS_202604 + TSHDEOA01_ROWS_202603 + TSHDEOA01_ROWS_202602
+def iter_all_seed_rows(
+    *,
+    count: int = TSHDEOA01_202604_TARGET_COUNT,
+    months: tuple[str, ...] = TSHDEOA01_SEED_MONTHS,
+) -> Iterator[tuple]:
+    """동일 고객·속성으로 여러 기준년월 행을 스트리밍 생성."""
+    for row in iter_rows_from_templates(
+        TSHDEOA01_SAMPLE_ROWS,
+        month=SOURCE_MONTH,
+        count=count,
+    ):
+        tail = row[1:]
+        for month in months:
+            yield (month, *tail)
+
+
+def _materialize_if_small() -> tuple[list[tuple], list[tuple], list[tuple], list[tuple]]:
+    count = TSHDEOA01_202604_TARGET_COUNT
+    if count > TSHDEOA01_EAGER_MATERIALIZE_LIMIT:
+        return [], [], [], []
+    rows_202604 = expand_rows_from_templates(
+        TSHDEOA01_SAMPLE_ROWS,
+        month=SOURCE_MONTH,
+        count=count,
+    )
+    rows_202603 = derive_rows_for_month(rows_202604, "202603")
+    rows_202602 = derive_rows_for_month(rows_202604, "202602")
+    all_rows = rows_202604 + rows_202603 + rows_202602
+    return rows_202604, rows_202603, rows_202602, all_rows
+
+
+TSHDEOA01_ROWS_202604, TSHDEOA01_ROWS_202603, TSHDEOA01_ROWS_202602, TSHDEOA01_ALL_ROWS = (
+    _materialize_if_small()
 )
 
-TSHDEOA01_UPSERT_SQL = f"""
+TSHDEOA01_INSERT_SQL = f"""
 INSERT INTO "{TSHDEOA01_SCHEMA}"."{TSHDEOA01_TABLE}" (
   "기준년월", "그룹회사코드", "그룹고객식별자",
   "당월고객계열사수", "활동고객계열사수", "핵심고객계열사수",
@@ -108,6 +156,10 @@ INSERT INTO "{TSHDEOA01_SCHEMA}"."{TSHDEOA01_TABLE}" (
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 )
+"""
+
+TSHDEOA01_UPSERT_SQL = f"""
+{TSHDEOA01_INSERT_SQL.rstrip()}
 ON CONFLICT ("기준년월", "그룹회사코드", "그룹고객식별자") DO UPDATE SET
   "당월고객계열사수" = EXCLUDED."당월고객계열사수",
   "활동고객계열사수" = EXCLUDED."활동고객계열사수",

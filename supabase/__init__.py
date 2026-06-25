@@ -1,1 +1,1 @@
-# Local Supabase SQL/seed helpers (not the supabase-py SDK).
+# Local SQL/seed helpers for Aurora PostgreSQL (not a cloud SDK).

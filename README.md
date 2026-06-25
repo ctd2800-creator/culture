@@ -1,6 +1,6 @@
 # Culture
 
-Supabase 테이블 데이터를 LangGraph로 조회·요약하고 Bedrock(Claude Sonnet 4.5)으로 응답하는 Flask 앱.
+Aurora PostgreSQL 테이블 데이터를 LangGraph로 조회·요약하고 Bedrock(Claude Sonnet 4.5)으로 응답하는 Flask 앱.
 
 ## 프로젝트 구조
 
@@ -33,7 +33,7 @@ python culture_app.py
 
 ### 회원 테이블 (`회원`)
 
-로컬 앱 기동 시 `SUPABASE_DB_URL` 이 있으면 테이블 생성·10명 시드(비어 있을 때만)를 시도합니다.  
+로컬 앱 기동 시 `AURORA_DB_URL` 이 있으면 테이블 생성·10명 시드(비어 있을 때만)를 시도합니다.  
 수동 적용:
 
 ```bash
@@ -82,7 +82,7 @@ python supabase/apply_tshde0zcd.py
 
 | 변수 | 설명 |
 |------|------|
-| `SUPABASE_DB_URL` | Postgres 연결 문자열 |
+| `AURORA_DB_URL` | Aurora Postgres 연결 문자열 |
 | `FLASK_SECRET_KEY` | 세션 키 |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Bedrock |
 | `AWS_SESSION_TOKEN` 또는 `AWS_SECURITY_TOKEN` | 임시 자격 증명 시 |

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,36 +20,69 @@ def _load_dotenv() -> None:
 
 
 def db_url() -> str:
-    _load_dotenv()
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-    if not raw:
-        raise SystemExit("SUPABASE_DB_URL 환경 변수가 없습니다.")
-    if "sslmode=" not in raw:
-        raw += ("&" if "?" in raw else "?") + "sslmode=require"
-    return raw
+    sys.path.insert(0, str(ROOT))
+    from supabase.db_util import get_db_url
+    return get_db_url()
 
 
 def main() -> None:
     sys.path.insert(0, str(ROOT))
     import psycopg2
+    from psycopg2.extras import execute_batch
 
     from supabase.table_config import TSHDEOA04_SCHEMA, TSHDEOA04_TABLE
-    from supabase.tshdeoa04_seed import TSHDEOA04_ALL_ROWS, TSHDEOA04_UPSERT_SQL
+    from supabase.tshdeoa04_seed import (
+        TSHDEOA04_202604_TARGET_COUNT,
+        TSHDEOA04_INSERT_SQL,
+        TSHDEOA04_SEED_MONTHS,
+        iter_all_o04_seed_rows,
+    )
+    from supabase.db_util import enable_db_writes
     from supabase.tshdeoa04_setup import ensure_tshdeoa04_table
 
+    batch_size = 5000
+    months = TSHDEOA04_SEED_MONTHS
+    per_month = TSHDEOA04_202604_TARGET_COUNT
+    total_expected = per_month * len(months)
+
+    started = time.time()
+    inserted = 0
+    batch: list[tuple] = []
+
     with psycopg2.connect(db_url()) as conn:
+        with conn.cursor() as cur:
+            enable_db_writes(cur)
         ensure_tshdeoa04_table(conn)
         with conn.cursor() as cur:
-            for month in ("202602", "202603", "202604"):
+            for month in months:
                 cur.execute(
                     f'DELETE FROM "{TSHDEOA04_SCHEMA}"."{TSHDEOA04_TABLE}" '
                     f'WHERE "기준년월" = %s AND "그룹회사코드" = %s',
                     (month, "KFG"),
                 )
-            for row in TSHDEOA04_ALL_ROWS:
-                cur.execute(TSHDEOA04_UPSERT_SQL, row)
+            conn.commit()
+
+            for row in iter_all_o04_seed_rows():
+                batch.append(row)
+                if len(batch) >= batch_size:
+                    execute_batch(cur, TSHDEOA04_INSERT_SQL, batch, page_size=batch_size)
+                    inserted += len(batch)
+                    batch.clear()
+                    if inserted % 300_000 == 0:
+                        elapsed = time.time() - started
+                        print(
+                            f"  ... {inserted:,} / {total_expected:,} rows ({elapsed:.0f}s)",
+                            flush=True,
+                        )
+                        conn.commit()
+
+            if batch:
+                execute_batch(cur, TSHDEOA04_INSERT_SQL, batch, page_size=batch_size)
+                inserted += len(batch)
+                batch.clear()
+
             counts: dict[str, int] = {}
-            for month in ("202602", "202603", "202604"):
+            for month in months:
                 cur.execute(
                     f'SELECT COUNT(*) FROM "{TSHDEOA04_SCHEMA}"."{TSHDEOA04_TABLE}" '
                     f'WHERE "기준년월" = %s AND "그룹회사코드" = %s',
@@ -57,9 +91,14 @@ def main() -> None:
                 counts[month] = cur.fetchone()[0]
         conn.commit()
 
-    print(f"OK: seeded {len(TSHDEOA04_ALL_ROWS)} rows into {TSHDEOA04_SCHEMA}.{TSHDEOA04_TABLE}")
-    for month in ("202602", "202603", "202604"):
-        print(f"  {month}/KFG rows in table: {counts[month]}")
+    elapsed = time.time() - started
+    print(
+        f"OK: seeded {inserted:,} rows into {TSHDEOA04_SCHEMA}.{TSHDEOA04_TABLE} "
+        f"({per_month:,}건/월 × {len(months)}개월, {elapsed:.0f}s)",
+        flush=True,
+    )
+    for month in months:
+        print(f"  {month}/KFG rows in table: {counts[month]:,}", flush=True)
 
 
 if __name__ == "__main__":

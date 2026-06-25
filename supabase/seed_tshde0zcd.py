@@ -19,13 +19,9 @@ def _load_dotenv() -> None:
 
 
 def db_url() -> str:
-    _load_dotenv()
-    raw = os.environ.get("SUPABASE_DB_URL", "").strip()
-    if not raw:
-        raise SystemExit("SUPABASE_DB_URL 환경 변수가 없습니다.")
-    if "sslmode=" not in raw:
-        raw += ("&" if "?" in raw else "?") + "sslmode=require"
-    return raw
+    sys.path.insert(0, str(ROOT))
+    from supabase.db_util import get_db_url
+    return get_db_url()
 
 
 def main() -> None:

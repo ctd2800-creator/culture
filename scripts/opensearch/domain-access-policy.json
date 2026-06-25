@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CultureSchemaDomainAccess",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::956723945403:user/Seungyoon-Choi",
+          "arn:aws:iam::956723945403:root"
+        ]
+      },
+      "Action": "es:*",
+      "Resource": "arn:aws:es:ap-northeast-2:956723945403:domain/culture-schema/*"
+    }
+  ]
+}
