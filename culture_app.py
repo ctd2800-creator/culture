@@ -742,6 +742,7 @@ PAGE = """
     }
     .prompt-chip {
       margin: 0;
+      flex: 0 0 auto;
       padding: 11px 13px;
       background: var(--kb-yellow-soft);
       border: 1px solid var(--kb-yellow-dark);
@@ -757,7 +758,6 @@ PAGE = """
       background: #ffeeb0;
       border-color: var(--kb-yellow);
     }
-    .prompt-chip + .prompt-chip { margin-top: 8px; }
     .table-chip {
       margin: 0;
       flex: 0 0 auto;
@@ -833,16 +833,23 @@ PAGE = """
       background: rgba(255, 255, 255, 0.55);
     }
     .member-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
       font-size: 15px;
-      line-height: 1.55;
+      line-height: 1.45;
       color: var(--kb-text-secondary);
+    }
+    .member-info {
+      min-width: 0;
     }
     .member-card strong {
       display: block;
       font-size: 16px;
       font-weight: 700;
       color: var(--kb-brown-darker);
-      margin-bottom: 4px;
+      margin-bottom: 2px;
     }
     .member-card .meta {
       display: block;
@@ -850,8 +857,8 @@ PAGE = """
       font-size: 14px;
     }
     .member-card .logout {
+      flex: 0 0 auto;
       display: inline-block;
-      margin-top: 10px;
       padding: 8px 13px;
       border-radius: 8px;
       background: var(--kb-yellow);
@@ -859,6 +866,7 @@ PAGE = """
       font-size: 14px;
       font-weight: 700;
       text-decoration: none;
+      white-space: nowrap;
     }
     .member-card .logout:hover { background: var(--kb-yellow-dark); }
     .main {
@@ -1266,11 +1274,14 @@ PAGE = """
         <h1 class="brand-title"><span class="brand-kb">KB AI</span> 데이터 리터러시</h1>
       </div>
       <div class="sidebar-body">
-        <section class="sidebar-section">
+        <section class="sidebar-section sidebar-section-scroll">
           <p class="sidebar-section-title">추천질문</p>
-          <p class="prompt-chip">26.04월 스타클럽등급별, 성별구분별 고객수 집계해줘</p>
-          <p class="prompt-chip">26.04월 연령코드별, 거래기간구분별 고객수 집계해줘</p>
-          <p class="prompt-chip">최근 3개월간 스타클럽등급 고객 변동 현황을 알려줘</p>
+          <div class="sidebar-scroll-list">
+            <p class="prompt-chip">26.04월 스타클럽등급별, 성별구분별 고객수 집계해줘</p>
+            <p class="prompt-chip">26.04월 연령코드별, 거래기간구분별 고객수 집계해줘</p>
+            <p class="prompt-chip">최근 3개월간 스타클럽등급 고객 변동 현황을 알려줘</p>
+            <p class="prompt-chip">이 변동 추이를 최근 금리 정책 변화와 연계해서 분석해줘</p>
+          </div>
         </section>
         <section class="sidebar-section sidebar-section-scroll">
           <p class="sidebar-section-title">분석가능 테이블</p>
@@ -1290,9 +1301,11 @@ PAGE = """
       {% if member %}
       <div class="sidebar-footer">
         <div class="member-card">
-          <strong>{{ member.회원명 }} ({{ member.아이디 }})</strong>
-          {% if member.부서명 %}<span class="meta">{{ member.부서명 }}</span>{% endif %}
-          {% if member.이메일 %}<span class="meta">{{ member.이메일 }}</span>{% endif %}
+          <div class="member-info">
+            <strong>{{ member.회원명 }} ({{ member.아이디 }})</strong>
+            {% if member.부서명 %}<span class="meta">{{ member.부서명 }}</span>{% endif %}
+            {% if member.이메일 %}<span class="meta">{{ member.이메일 }}</span>{% endif %}
+          </div>
           <a class="logout" href="{{ url_for('logout') }}">로그아웃</a>
         </div>
       </div>
@@ -1334,7 +1347,7 @@ PAGE = """
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="/static/culture_chat.js?v=66"></script>
+  <script src="/static/culture_chat.js?v=67"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
