@@ -6,6 +6,7 @@ Culture LangGraph 워크플로우
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Literal, TypedDict
 
@@ -685,7 +686,24 @@ def external_insight_node(state: CultureState) -> dict[str, Any]:
         query = (pending.get("query") or "").strip()
         if query:
             out["inst1_queries"] = {result_key: query}
+    # 차트 에이전트가 생성한 모든 차트를 분석 결과에도 함께 표시.
+    # 세션에 저장된 specs 배열은 용량이 커서 일부 유실될 수 있으므로,
+    # 저장된 차트 유형 목록으로 데이터에서 전체 차트를 재생성한다(다중 측정값 포함).
     charts = list(pending.get("charts") or [])
+    chart_types = [t for t in (pending.get("chart_types") or []) if t]
+    if chart_types:
+        regenerated: list[dict[str, Any]] = []
+        for ct in chart_types:
+            try:
+                regenerated.extend(
+                    build_aggregate_chart_specs(pending, chart_type=ct)
+                )
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "차트 재생성 실패: %s", ct, exc_info=True
+                )
+        if regenerated:
+            charts = regenerated
     if charts:
         out["chart_specs"] = charts
     return out

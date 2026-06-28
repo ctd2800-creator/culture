@@ -1488,6 +1488,12 @@ def generate_chart_api():
     pending = dict(pending)
     pending["charts"] = list(pending.get("charts") or []) + specs
     pending["chart_type"] = chart_type
+    # 생성된 차트 유형을 순서대로 누적(중복 제거) — 분석 에이전트에서 전체 차트 재생성용.
+    # (specs 자체는 용량이 커서 세션 유지가 불안정하므로 유형 목록만 별도 보관)
+    prior_types = [t for t in (pending.get("chart_types") or []) if t]
+    if chart_type not in prior_types:
+        prior_types.append(chart_type)
+    pending["chart_types"] = prior_types
     session["chat_history"] = history
     session["pending_chart"] = pending
     bundle = session.get("inst1_extract_bundle")
