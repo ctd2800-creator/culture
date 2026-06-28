@@ -12,6 +12,9 @@ window.CultureChat = {
     const statusLine = document.getElementById("statusLine");
     const chatNotice = document.getElementById("chatNotice");
     let pendingChartReady = !!opts.hasPendingChart;
+    // 현재 집계 결과에 대해 사용자가 생성한 차트 유형(순서·중복 제거).
+    // 분석 에이전트 요청 시 서버로 전달해 세션 유실과 무관하게 모든 차트를 재생성.
+    let generatedChartTypes = [];
     let liveChatHistory = (opts.history || []).map((item) => ({
       role: item.role,
       content: item.content || "",
@@ -456,6 +459,8 @@ window.CultureChat = {
       if (!options || !options.length || container.querySelector("[data-chart-type-picker]")) {
         return;
       }
+      // 새 집계 결과의 차트 유형 선택지가 나타나면 생성 이력 초기화.
+      generatedChartTypes = [];
       const block = document.createElement("div");
       block.className = "msg-follow-up msg-chart-type-picker";
       block.dataset.chartTypePicker = "1";
@@ -496,6 +501,9 @@ window.CultureChat = {
         if (data.charts && data.charts.length) {
           renderCharts(container, data.charts);
           appendChartsToLastAssistant(data.charts);
+        }
+        if (generatedChartTypes.indexOf(chartType) === -1) {
+          generatedChartTypes.push(chartType);
         }
         buttons.forEach((b) => {
           b.disabled = false;
@@ -1275,7 +1283,7 @@ window.CultureChat = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, chart_types: generatedChartTypes }),
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -1314,7 +1322,7 @@ window.CultureChat = {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
-          body: JSON.stringify({ message: text }),
+          body: JSON.stringify({ message: text, chart_types: generatedChartTypes }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {

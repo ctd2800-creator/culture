@@ -397,6 +397,31 @@ def session_pending_chart_ready(session_obj) -> bool:
     return bool(get_session_pending_chart(session_obj).get("rows"))
 
 
+def pending_chart_with_client_types(
+    session_obj, client_chart_types: Any
+) -> dict[str, Any]:
+    """세션 pending_chart에 클라이언트가 보낸 차트 유형을 병합.
+
+    Vercel 서버리스에서 세션의 차트 정보가 요청 간 유실될 수 있으므로,
+    프론트엔드가 보유한 생성 차트 유형을 우선 신뢰해 분석 에이전트에서
+    모든 차트를 재생성하도록 한다.
+    """
+    from culture_inst1_agents import build_chart_type_options
+
+    pending = get_session_pending_chart(session_obj)
+    if not isinstance(client_chart_types, (list, tuple)):
+        return pending
+    valid = {opt["id"] for opt in build_chart_type_options()}
+    merged: list[str] = [t for t in (pending.get("chart_types") or []) if t]
+    for t in client_chart_types:
+        t = (str(t) or "").strip().lower()
+        if t in valid and t not in merged:
+            merged.append(t)
+    if merged:
+        pending = {**pending, "chart_types": merged}
+    return pending
+
+
 def _sync_inst1_extract_bundle(
     session_obj,
     final: dict[str, Any],
@@ -445,6 +470,7 @@ def run_chat(
     history: list[dict],
     *,
     table_name: str | None = None,
+    chart_types: Any = None,
 ) -> tuple[
     str,
     str | None,
@@ -469,7 +495,7 @@ def run_chat(
         table_name=table_name,
         history=history,
         pending_aggregate=session.get("pending_aggregate"),
-        pending_chart=get_session_pending_chart(session),
+        pending_chart=pending_chart_with_client_types(session, chart_types),
         allowed_tables=allowed_tables_list(),
     )
     _sync_pending_aggregate_session(session, final)
@@ -1347,7 +1373,7 @@ PAGE = """
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="/static/culture_chat.js?v=67"></script>
+  <script src="/static/culture_chat.js?v=68"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
@@ -1544,7 +1570,7 @@ def chat_api():
             aggregate_column_pick_mode,
             schema_pipeline_notice,
         ) = run_chat(
-            raw, history, table_name=table_name
+            raw, history, table_name=table_name, chart_types=data.get("chart_types")
         )
         if not reply.strip():
             reply = "(모델이 빈 응답을 반환했습니다.)"
@@ -1763,6 +1789,7 @@ def chat_stream():
     session.modified = True
     save_user_question(raw)
     allowed_tables = allowed_tables_list()
+    pending_chart = pending_chart_with_client_types(session, data.get("chart_types"))
 
     def generate():
         try:
@@ -1783,7 +1810,7 @@ def chat_stream():
                 "inst1_queries": {},
                 "extract_tables": [],
                 "pending_aggregate": session.get("pending_aggregate") or {},
-                "pending_chart": get_session_pending_chart(session),
+                "pending_chart": pending_chart,
                 "chart_specs": [],
                 "chart_type_options": [],
                 "schema_pipeline_notice": "",
