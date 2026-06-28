@@ -48,11 +48,14 @@ from culture_inst1_agents import (
     mask_inst1_data_for_display,
 )
 from culture_excel import build_excel_bytes, export_has_data, save_excel_to_disk
-from culture_pdf_s3 import (
-    build_agent_report_pdf_bytes,
-    report_has_data,
-    save_report_to_disk,
-    s3_configured,
+from culture_pdf_s3 import save_report_to_disk, s3_configured
+from culture_ppt_report import (
+    apply_report_patch,
+    ascii_report_filename,
+    build_chat_report_docx_bytes,
+    chat_history_has_data,
+    latest_analysis_section,
+    merge_chat_histories,
 )
 from culture_workflow import (
     aws_credentials_configured,
@@ -64,20 +67,28 @@ from culture_workflow import (
     get_model_id,
     run_workflow,
 )
-from supabase.culture_db import (
+from culture_db.culture_db import (
     culture_db_backend,
     culture_db_configured,
     get_culture_db_url,
 )
-from supabase.members_auth import authenticate_member
-from supabase.members_setup import setup_members
-from supabase.table_config import (
+from culture_db.members_auth import authenticate_member
+from culture_db.members_setup import setup_members
+from culture_db.permissions_setup import (
+    fetch_allowed_tables,
+    setup_user_permissions,
+)
+from culture_db.question_log_setup import (
+    ensure_question_log_table,
+    fetch_recent_questions,
+    insert_question,
+)
+from culture_db.table_config import (
     MEMBER_TABLE_NAME,
-    TABLE_NAME,
     inst1_schema_table_display_items,
 )
-from supabase.aurora_setup import ensure_tshde0zcd_table as ensure_tshde0zcd_table_aurora
-from supabase.aurora_setup import ensure_tshdeoa_tables
+from culture_db.aurora_setup import ensure_tshde0zcd_table as ensure_tshde0zcd_table_aurora
+from culture_db.aurora_setup import ensure_tshdeoa_tables
 
 PUBLIC_ENDPOINTS = frozenset(
     {
@@ -90,8 +101,9 @@ PUBLIC_ENDPOINTS = frozenset(
 
 _db_url_cache: str | None = None
 _db_init_lock = threading.Lock()
-_tchdhc001_initialized = False
 _members_initialized = False
+_question_log_initialized = False
+_permissions_initialized = False
 _tshdeoa01_initialized = False
 _tshdeoa02_initialized = False
 _tshdeoa04_initialized = False
@@ -116,6 +128,27 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "culture-dev-secret-change-m
 if os.environ.get("VERCEL"):
     app.config["SESSION_COOKIE_SECURE"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# 서버측 세션 — 대용량 집계 행·차트가 4KB 쿠키 한도를 넘어 누락되는 문제 방지.
+# (Vercel은 /tmp만 쓰기 가능, 로컬은 프로젝트 .flask_session 디렉터리 사용)
+try:
+    from flask_session import Session as _ServerSession
+
+    _session_root = (
+        Path("/tmp/culture_flask_session")
+        if os.environ.get("VERCEL")
+        else Path(__file__).resolve().parent / ".flask_session"
+    )
+    _session_root.mkdir(parents=True, exist_ok=True)
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_FILE_DIR"] = str(_session_root)
+    app.config["SESSION_PERMANENT"] = False
+    app.config["SESSION_USE_SIGNER"] = True
+    _ServerSession(app)
+    logging.getLogger(__name__).info("server-side filesystem session enabled at %s", _session_root)
+except Exception:
+    logging.getLogger(__name__).warning("flask_session unavailable — falling back to cookie session", exc_info=True)
+
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 logging.basicConfig(level=logging.INFO)
 
@@ -142,12 +175,70 @@ def current_member() -> dict[str, Any] | None:
     }
 
 
+def _load_allowed_tables(member_id: str | None) -> set[str] | None:
+    """DB에서 사용자 접근 가능 테이블 조회. None = 제한 없음(전체)."""
+    if not member_id or not db_configured():
+        return None
+    try:
+        with get_conn() as conn:
+            return fetch_allowed_tables(conn, member_id)
+    except Exception:
+        app.logger.exception("유저 권한 조회 실패")
+        return None
+
+
+def current_allowed_tables() -> set[str] | None:
+    """현재 로그인 사용자의 접근 가능 테이블 집합. None = 전체 접근."""
+    if not is_logged_in():
+        return set()
+    if session.get("allowed_tables_loaded"):
+        stored = session.get("allowed_tables")
+        return set(stored) if stored is not None else None
+    allowed = _load_allowed_tables(session.get("member_id"))
+    session["allowed_tables"] = sorted(allowed) if allowed is not None else None
+    session["allowed_tables_loaded"] = True
+    session.modified = True
+    return allowed
+
+
+def allowed_tables_list() -> list[str] | None:
+    """워크플로우에 전달할 리스트(None = 제한 없음)."""
+    allowed = current_allowed_tables()
+    return sorted(allowed) if allowed is not None else None
+
+
+def filtered_inst1_table_items() -> list[dict[str, str]]:
+    """권한에 따라 필터링된 분석 가능 테이블 목록."""
+    items = inst1_schema_table_display_items()
+    allowed = current_allowed_tables()
+    if allowed is None:
+        return items
+    return [it for it in items if it.get("table") in allowed]
+
+
+def save_user_question(question: str) -> None:
+    """로그인 사용자의 질문을 질문내역 테이블에 저장 (best-effort)."""
+    member_id = session.get("member_id")
+    if not member_id or not (question or "").strip():
+        return
+    if not db_configured():
+        return
+    try:
+        with get_conn() as conn:
+            insert_question(conn, member_id=member_id, question=question)
+            conn.commit()
+    except Exception:
+        app.logger.exception("질문 내역 저장 실패")
+
+
 def login_member(member: dict[str, Any]) -> None:
     session["member_id"] = member["아이디"]
     session["member_name"] = member["회원명"]
     session["member_email"] = member.get("이메일", "")
     session["member_dept"] = member.get("부서명", "")
     session["chat_history"] = []
+    session.pop("allowed_tables", None)
+    session.pop("allowed_tables_loaded", None)
     session.modified = True
 
 
@@ -182,7 +273,7 @@ def require_login():
 
 @app.before_request
 def ensure_db_tables_ready():
-    global _tchdhc001_initialized, _members_initialized
+    global _members_initialized, _question_log_initialized, _permissions_initialized
     global _tshdeoa01_initialized, _tshdeoa02_initialized, _tshdeoa04_initialized, _tshde0zcd_initialized
     if request.endpoint in ("api_health", "static_files"):
         return
@@ -195,8 +286,9 @@ def ensure_db_tables_ready():
     if not db_configured():
         return
     if (
-        _tchdhc001_initialized
-        and _members_initialized
+        _members_initialized
+        and _question_log_initialized
+        and _permissions_initialized
         and _tshdeoa01_initialized
         and _tshdeoa02_initialized
         and _tshdeoa04_initialized
@@ -205,8 +297,9 @@ def ensure_db_tables_ready():
         return
     with _db_init_lock:
         if (
-            _tchdhc001_initialized
-            and _members_initialized
+            _members_initialized
+            and _question_log_initialized
+            and _permissions_initialized
             and _tshdeoa01_initialized
             and _tshdeoa02_initialized
             and _tshdeoa04_initialized
@@ -215,12 +308,15 @@ def ensure_db_tables_ready():
             return
         try:
             with get_conn() as conn:
-                if not _tchdhc001_initialized:
-                    ensure_tchdhc001_table(conn)
-                    _tchdhc001_initialized = True
                 if not _members_initialized:
                     setup_members(conn, seed=True, force_seed=False)
                     _members_initialized = True
+                if not _question_log_initialized:
+                    ensure_question_log_table(conn)
+                    _question_log_initialized = True
+                if not _permissions_initialized:
+                    setup_user_permissions(conn, seed=True, force_seed=False)
+                    _permissions_initialized = True
                 if not _tshdeoa01_initialized:
                     ensure_tshdeoa_tables(conn)
                     _tshdeoa01_initialized = True
@@ -267,17 +363,9 @@ def add_no_cache_headers(response):
 
 
 def get_conn():
-    from supabase.culture_db import connect_culture_db
+    from culture_db.culture_db import connect_culture_db
 
     return connect_culture_db(connect_timeout=15)
-
-
-def ensure_tchdhc001_table(conn) -> None:
-    sql_path = os.path.join(os.path.dirname(__file__), "supabase", "tchdhc001.sql")
-    with open(sql_path, encoding="utf-8") as f:
-        ddl = f.read()
-    with conn.cursor() as cur:
-        cur.execute(ddl)
 
 
 def _sse_event(payload: dict) -> str:
@@ -289,13 +377,65 @@ def _sse_pad() -> str:
     return ":" + (" " * 2048) + "\n\n"
 
 
-def _chart_available_from_final(final: dict[str, Any]) -> bool:
-    return bool(final.get("chart_available"))
+def _chart_type_options_from_final(final: dict[str, Any]) -> list[dict[str, str]]:
+    return list(final.get("chart_type_options") or [])
+
+
+def get_session_pending_chart(session_obj) -> dict[str, Any]:
+    """세션 집계 스냅샷 — 차트·외부요인 follow-up용 (리셋 방지)."""
+    pending = dict(session_obj.get("pending_chart") or {})
+    if pending.get("rows"):
+        return pending
+    bundle = session_obj.get("inst1_extract_bundle") or {}
+    fallback = dict(bundle.get("pending_chart") or {})
+    if fallback.get("rows"):
+        return fallback
+    return pending
+
+
+def session_pending_chart_ready(session_obj) -> bool:
+    return bool(get_session_pending_chart(session_obj).get("rows"))
+
+
+def _sync_inst1_extract_bundle(
+    session_obj,
+    final: dict[str, Any],
+    *,
+    inst1_data: dict[str, Any] | None = None,
+    excel_export: dict[str, Any] | None = None,
+) -> None:
+    """데이터 추출 성공 시 세션 스냅샷 저장 — 후속 에이전트에서 재사용."""
+    analysis = final.get("question_analysis") or {}
+    if analysis.get("intent") != "inst1_extract":
+        return
+    data = inst1_data if inst1_data is not None else (final.get("inst1_data") or {})
+    if not sum(len(v) for v in data.values()):
+        return
+    pending = dict(session_obj.get("pending_chart") or {})
+    if not pending.get("rows") and "pending_chart" in final:
+        pending = dict(final.get("pending_chart") or {})
+    bundle = {
+        "inst1_data": data,
+        "inst1_queries": dict(final.get("inst1_queries") or {}),
+        "inst1_column_orders": dict(final.get("inst1_column_orders") or {}),
+        "inst1_result_labels": dict(final.get("inst1_result_labels") or {}),
+        "excel_export": dict(
+            excel_export if excel_export is not None else (final.get("excel_export") or {})
+        ),
+        "follow_up_questions": list(final.get("follow_up_questions") or []),
+        "pending_chart": pending,
+    }
+    session_obj["inst1_extract_bundle"] = bundle
+    if pending.get("rows"):
+        session_obj["pending_chart"] = pending
+
+
+_REPORT_EXPORT_AGENTS = frozenset({"inst1_data_summary", "inst1_external_insight"})
 
 
 def _client_report_export(report: dict[str, Any]) -> dict[str, Any]:
-    """UI 보고서 버튼 — 데이터 요약 에이전트 결과만 노출."""
-    if (report.get("agent") or "") == "inst1_data_summary":
+    """UI 보고서 버튼 — 데이터 요약·추출 에이전트 결과 노출."""
+    if (report.get("agent") or "") in _REPORT_EXPORT_AGENTS:
         return dict(report)
     return {}
 
@@ -317,7 +457,7 @@ def run_chat(
     list[str],
     dict[str, Any],
     dict[str, Any],
-    bool,
+    list[dict[str, str]],
     list[str],
     str,
     str,
@@ -329,7 +469,8 @@ def run_chat(
         table_name=table_name,
         history=history,
         pending_aggregate=session.get("pending_aggregate"),
-        pending_chart=session.get("pending_chart"),
+        pending_chart=get_session_pending_chart(session),
+        allowed_tables=allowed_tables_list(),
     )
     _sync_pending_aggregate_session(session, final)
     _sync_pending_chart_session(session, final)
@@ -351,8 +492,14 @@ def run_chat(
     ).strip()
     excel_export = mask_excel_export_for_display(dict(final.get("excel_export") or {}))
     report_export = _client_report_export(dict(final.get("report_export") or {}))
-    chart_available = _chart_available_from_final(final)
+    chart_type_options = _chart_type_options_from_final(final)
     schema_pipeline_notice = (final.get("schema_pipeline_notice") or "").strip()
+    _sync_inst1_extract_bundle(
+        session,
+        final,
+        inst1_data=inst1_data,
+        excel_export=excel_export,
+    )
     return (
         reply,
         notice,
@@ -365,7 +512,7 @@ def run_chat(
         follow_up_questions,
         excel_export,
         report_export,
-        chart_available,
+        chart_type_options,
         aggregate_column_options,
         aggregate_column_label,
         aggregate_column_pick_mode,
@@ -522,120 +669,198 @@ PAGE = """
     .app-shell {
       display: flex;
       height: 100vh;
-      min-width: 960px;
+      min-width: 1000px;
     }
     .sidebar {
-      width: 300px;
+      width: 340px;
       flex-shrink: 0;
       display: flex;
       flex-direction: column;
-      background: linear-gradient(180deg, var(--kb-brown-darker) 0%, var(--kb-brown-dark) 100%);
-      color: var(--kb-sidebar-text);
-      border-right: 1px solid #4a3f34;
+      background: linear-gradient(180deg, #eef2f7 0%, #e3e9f1 100%);
+      color: var(--kb-text-secondary);
+      border-right: 1px solid #cdd5e0;
     }
     .sidebar-brand {
-      padding: 22px 20px 16px;
-      border-bottom: 1px solid rgba(255, 204, 0, 0.2);
+      padding: 22px 20px 18px;
+      border-bottom: 1px solid #d2dae5;
     }
     .sidebar-brand h1 {
       margin: 0;
-      font-size: 1.25rem;
+      font-size: 1.7rem;
       font-weight: 800;
-      color: var(--kb-yellow);
+      color: var(--kb-brown-darker);
       letter-spacing: -0.02em;
-      line-height: 1.4;
+      line-height: 1.35;
+    }
+    .brand-kb {
+      color: var(--kb-yellow-dark);
+      font-weight: 900;
     }
     .sidebar-brand p {
       margin: 8px 0 0;
       font-size: 14px;
-      color: #f2ebe2;
+      color: var(--kb-text-muted);
       line-height: 1.5;
     }
     .sidebar-body {
       flex: 1;
-      overflow-y: auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       padding: 16px 16px 12px;
     }
     .sidebar-section {
-      margin-bottom: 18px;
+      margin-bottom: 14px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 12px 12px 13px;
+      background: #ffffff;
+      border: 1px solid #d7dee8;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(44, 36, 25, 0.08);
+    }
+    .sidebar-section-scroll {
+      flex: 1 1 0;
+      min-height: 0;
+      margin-bottom: 14px;
+    }
+    .sidebar-section:last-child {
+      margin-bottom: 0;
     }
     .sidebar-section-title {
       margin: 0 0 10px;
-      font-size: 13px;
+      padding-bottom: 8px;
+      font-size: 14px;
       font-weight: 800;
-      letter-spacing: 0.03em;
+      letter-spacing: 0.04em;
       text-transform: uppercase;
-      color: var(--kb-yellow);
+      color: var(--kb-brown);
+      border-bottom: 2px solid var(--kb-yellow);
+      flex-shrink: 0;
     }
     .prompt-chip {
       margin: 0;
       padding: 11px 13px;
-      background: rgba(255, 204, 0, 0.12);
-      border: 1px solid rgba(255, 204, 0, 0.3);
+      background: var(--kb-yellow-soft);
+      border: 1px solid var(--kb-yellow-dark);
       border-radius: 10px;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 500;
       line-height: 1.55;
-      color: #ffffff;
+      color: var(--kb-brown-darker);
       cursor: pointer;
       transition: background 0.15s, border-color 0.15s;
     }
     .prompt-chip:hover {
-      background: rgba(255, 204, 0, 0.16);
-      border-color: rgba(255, 204, 0, 0.45);
+      background: #ffeeb0;
+      border-color: var(--kb-yellow);
     }
     .prompt-chip + .prompt-chip { margin-top: 8px; }
     .table-chip {
       margin: 0;
-      padding: 9px 13px;
-      background: rgba(0, 0, 0, 0.22);
-      border: 1px solid rgba(255, 255, 255, 0.16);
+      flex: 0 0 auto;
+      padding: 10px 13px;
+      background: var(--kb-yellow-soft);
+      border: 1px solid var(--kb-yellow-dark);
       border-radius: 8px;
-      font-size: 14px;
+      font-size: 15px;
       font-weight: 500;
-      color: #ffffff;
+      color: var(--kb-brown-darker);
       cursor: pointer;
       transition: background 0.15s, border-color 0.15s;
     }
     .table-chip:hover {
-      background: rgba(255, 204, 0, 0.12);
-      border-color: rgba(255, 204, 0, 0.35);
+      background: #ffeeb0;
+      border-color: var(--kb-yellow);
     }
-    .table-chip + .table-chip { margin-top: 6px; }
+    .sidebar-scroll-list {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 4px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--kb-yellow-dark) transparent;
+    }
+    .sidebar-scroll-list::-webkit-scrollbar {
+      width: 6px;
+    }
+    .sidebar-scroll-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .sidebar-scroll-list::-webkit-scrollbar-thumb {
+      background: rgba(230, 184, 0, 0.6);
+      border-radius: 8px;
+    }
+    .sidebar-scroll-list::-webkit-scrollbar-thumb:hover {
+      background: var(--kb-yellow-dark);
+    }
+    .question-chip {
+      margin: 0;
+      flex: 0 0 auto;
+      padding: 10px 12px;
+      background: var(--kb-yellow-soft);
+      border: 1px solid var(--kb-yellow-dark);
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.5;
+      color: var(--kb-brown-darker);
+      cursor: pointer;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .question-chip:hover {
+      background: #ffeeb0;
+      border-color: var(--kb-yellow);
+    }
+    .question-history-empty {
+      margin: 0;
+      flex: 0 0 auto;
+      font-size: 14px;
+      color: var(--kb-text-muted);
+    }
     .sidebar-footer {
       padding: 14px 16px 18px;
-      border-top: 1px solid rgba(255, 204, 0, 0.15);
-      background: rgba(0, 0, 0, 0.15);
+      border-top: 1px solid #d2dae5;
+      background: rgba(255, 255, 255, 0.55);
     }
     .member-card {
-      font-size: 14px;
+      font-size: 15px;
       line-height: 1.55;
-      color: var(--kb-sidebar-text);
+      color: var(--kb-text-secondary);
     }
     .member-card strong {
       display: block;
-      font-size: 15px;
+      font-size: 16px;
       font-weight: 700;
-      color: #fff;
+      color: var(--kb-brown-darker);
       margin-bottom: 4px;
     }
     .member-card .meta {
       display: block;
-      color: #e8ddd0;
-      font-size: 13px;
+      color: var(--kb-text-muted);
+      font-size: 14px;
     }
     .member-card .logout {
       display: inline-block;
       margin-top: 10px;
       padding: 8px 13px;
       border-radius: 8px;
-      background: rgba(255, 204, 0, 0.2);
-      color: var(--kb-yellow);
-      font-size: 13px;
+      background: var(--kb-yellow);
+      color: var(--kb-brown-darker);
+      font-size: 14px;
       font-weight: 700;
       text-decoration: none;
     }
-    .member-card .logout:hover { background: rgba(255, 204, 0, 0.25); }
+    .member-card .logout:hover { background: var(--kb-yellow-dark); }
     .main {
       flex: 1;
       min-width: 0;
@@ -826,6 +1051,9 @@ PAGE = """
       word-break: break-word;
       color: inherit;
     }
+    .msg-analysis-tail {
+      margin-top: 14px;
+    }
     .msg-follow-up {
       margin-top: 12px;
       padding: 0;
@@ -957,6 +1185,24 @@ PAGE = """
       width: 100%;
       height: 320px;
     }
+    .chart-block-actions {
+      margin-top: 10px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .btn-chart-image-save {
+      border: 0;
+      padding: 8px 16px;
+      min-height: 36px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+      background: var(--kb-brown);
+      color: #fff;
+    }
+    .btn-chart-image-save:hover { background: var(--kb-brown-dark); }
+    .btn-chart-image-save:disabled { opacity: 0.6; cursor: not-allowed; }
     .pdf-link-wrap {
       margin-top: 12px;
       padding-top: 10px;
@@ -1006,26 +1252,39 @@ PAGE = """
       font-weight: 700;
       color: var(--kb-brown-darker);
     }
+    .inst1-table td.inst1-cell-merged {
+      vertical-align: middle;
+      background: #fbf7ef;
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <h1>KB AI 데이터 리터러시</h1>
-        <p>그룹고객 데이터 분석 채팅</p>
+        <h1 class="brand-title"><span class="brand-kb">KB AI</span> 데이터 리터러시</h1>
       </div>
       <div class="sidebar-body">
         <section class="sidebar-section">
           <p class="sidebar-section-title">추천질문</p>
-          <p class="prompt-chip">26.04월 그룹고객기본정보의 KB스타클럽그룹최고등급별, 성별구분별 고객수 집계해줘</p>
-          <p class="prompt-chip">26.04월 그룹고객기본정보, 그룹고객거래기본의 연령코드별, 거래기간구분별 고객수 집계해줘</p>
+          <p class="prompt-chip">26.04월 스타클럽등급별, 성별구분별 고객수 집계해줘</p>
+          <p class="prompt-chip">26.04월 연령코드별, 거래기간구분별 고객수 집계해줘</p>
+          <p class="prompt-chip">최근 3개월간 스타클럽등급 고객 변동 현황을 알려줘</p>
         </section>
-        <section class="sidebar-section">
+        <section class="sidebar-section sidebar-section-scroll">
           <p class="sidebar-section-title">분석가능 테이블</p>
-          {% for item in inst1_tables %}
-          <p class="table-chip" data-table="{{ item.table }}">{{ item.label }}</p>
-          {% endfor %}
+          <div class="sidebar-scroll-list">
+            {% for item in inst1_tables %}
+            <p class="table-chip" data-table="{{ item.table }}">{{ item.label }}</p>
+            {% endfor %}
+          </div>
+        </section>
+        <section class="sidebar-section sidebar-section-scroll">
+          <p class="sidebar-section-title">질문 내역</p>
+          <div id="questionHistory" class="question-history sidebar-scroll-list">
+            <p class="question-history-empty">아직 질문 내역이 없습니다.</p>
+          </div>
         </section>
       </div>
       {% if member %}
@@ -1075,7 +1334,7 @@ PAGE = """
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="/static/culture_chat.js?v=50"></script>
+  <script src="/static/culture_chat.js?v=66"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       if (window.CultureChat) {
@@ -1083,6 +1342,7 @@ PAGE = """
           history: {{ chat_history | tojson }},
           preferStream: false,
           inst1Tables: {{ inst1_tables | tojson }},
+          hasPendingChart: {{ has_pending_chart | tojson }},
         });
       } else {
         console.error("culture_chat.js 로드 실패");
@@ -1136,17 +1396,26 @@ def export_excel_api():
 
 @app.route("/api/export/report", methods=["POST"])
 def export_report_api():
-    """차트·요약 에이전트 응답 → PDF 보고서 다운로드 + culture/reports 저장."""
+    """가장 최근 분석 에이전트 결과 → Word(.docx) 보고서 다운로드 + culture/reports 저장."""
+    ensure_session_lists()
     data = request.get_json(silent=True) or {}
-    report = data.get("report") if isinstance(data.get("report"), dict) else data
-    if not isinstance(report, dict) or not report_has_data(report):
-        return jsonify({"ok": False, "error": "보고서로 저장할 내용이 없습니다."}), 400
+    server_history = list(session.get("chat_history") or [])
+    client_messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    report_patch = data.get("report") if isinstance(data.get("report"), dict) else {}
+    history = merge_chat_histories(server_history, client_messages)
+    history = apply_report_patch(history, report_patch)
+    if not chat_history_has_data(history) or latest_analysis_section(history) is None:
+        return jsonify({"ok": False, "error": "보고서로 저장할 분석 결과가 없습니다."}), 400
     try:
-        content = build_agent_report_pdf_bytes(report)
+        content = build_chat_report_docx_bytes(history)
         if len(content) < 100:
-            raise ValueError("생성된 PDF 파일이 비어 있습니다.")
-        filename = str(report.get("filename") or "culture_report.pdf")
-        filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.pdf"
+            raise ValueError("생성된 보고서 파일이 비어 있습니다.")
+        filename = str(data.get("filename") or ascii_report_filename("culture_report", ext="docx"))
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.docx"
+        if filename.lower().endswith(".pptx"):
+            filename = filename[:-5] + ".docx"
+        if not filename.lower().endswith(".docx"):
+            filename += ".docx"
         saved_path = save_report_to_disk(content, filename)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -1155,7 +1424,7 @@ def export_report_api():
     buf.seek(0)
     resp = send_file(
         buf,
-        mimetype="application/pdf",
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         as_attachment=True,
         download_name=saved_path.name if saved_path else filename,
     )
@@ -1167,33 +1436,52 @@ def export_report_api():
 
 @app.route("/api/generate/chart", methods=["POST"])
 def generate_chart_api():
-    """세션 pending_chart 기반 막대 차트 생성."""
+    """세션 pending_chart + 선택한 차트 유형으로 차트 생성."""
+    from culture_inst1_agents import build_chart_type_options
+
     ensure_session_lists()
-    pending = session.get("pending_chart") or {}
+    data = request.get_json(silent=True) or {}
+    chart_type = (data.get("chart_type") or "").strip().lower()
+    valid_types = {opt["id"] for opt in build_chart_type_options()}
+    if chart_type not in valid_types:
+        return jsonify({"ok": False, "error": "차트 유형을 선택해 주세요."}), 400
+
+    pending = get_session_pending_chart(session)
     if not pending.get("rows"):
         return jsonify(
             {"ok": False, "error": "차트로 그릴 집계 데이터가 없습니다. 먼저 집계 데이터를 조회해 주세요."}
         ), 400
+    if not pending.get("chartable"):
+        return jsonify(
+            {"ok": False, "error": "차트로 시각화할 숫자 집계 항목이 없습니다."}
+        ), 400
     try:
-        specs = build_aggregate_chart_specs(pending)
+        specs = build_aggregate_chart_specs(pending, chart_type=chart_type)
         if not specs:
             raise ValueError("차트 데이터가 비어 있습니다.")
-        display = pending.get("display_label") or "집계 데이터"
         analysis = {"intent": "inst1_chart", "reason": "집계 데이터 차트 생성"}
-        text = format_chart_agent_reply(analysis, pending, specs)
+        text = format_chart_agent_reply(analysis, pending, chart_type=chart_type)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
     history = list(session.get("chat_history", []))
     for i in range(len(history) - 1, -1, -1):
         item = history[i]
-        if item.get("role") == "assistant" and item.get("chart_available"):
-            item["charts"] = specs
-            item["chart_available"] = False
+        if item.get("role") == "assistant" and item.get("chart_type_options"):
+            item["charts"] = list(item.get("charts") or []) + specs
+            item["chart_type_options"] = build_chart_type_options()
             history[i] = item
             break
+    pending = dict(pending)
+    pending["charts"] = list(pending.get("charts") or []) + specs
+    pending["chart_type"] = chart_type
     session["chat_history"] = history
-    session.pop("pending_chart", None)
+    session["pending_chart"] = pending
+    bundle = session.get("inst1_extract_bundle")
+    if isinstance(bundle, dict) and bundle:
+        bundle = dict(bundle)
+        bundle["pending_chart"] = pending
+        session["inst1_extract_bundle"] = bundle
     session.modified = True
 
     return jsonify(
@@ -1217,6 +1505,7 @@ def chat_api():
 
     history = list(session.get("chat_history", []))
     history.append({"role": "user", "content": raw})
+    save_user_question(raw)
     try:
         (
             reply,
@@ -1230,7 +1519,7 @@ def chat_api():
             follow_up_questions,
             excel_export,
             report_export,
-            chart_available,
+            chart_type_options,
             aggregate_column_options,
             aggregate_column_label,
             aggregate_column_pick_mode,
@@ -1256,7 +1545,7 @@ def chat_api():
                 "aggregate_column_pick_mode": aggregate_column_pick_mode,
                 "excel_export": excel_export,
                 "report_export": report_export,
-                "chart_available": chart_available,
+                "chart_type_options": chart_type_options,
                 "schema_pipeline_notice": schema_pipeline_notice,
             }
         )
@@ -1280,7 +1569,8 @@ def chat_api():
                 "aggregate_column_pick_mode": aggregate_column_pick_mode,
                 "excel_export": excel_export,
                 "report_export": report_export,
-                "chart_available": chart_available,
+                "chart_type_options": chart_type_options,
+                "pending_chart_ready": session_pending_chart_ready(session),
             }
         )
     except Exception as e:
@@ -1389,6 +1679,7 @@ def reset_chat_session() -> None:
     session.pop("chat_notice", None)
     session.pop("pending_aggregate", None)
     session.pop("pending_chart", None)
+    session.pop("inst1_extract_bundle", None)
     session["app_boot_id"] = APP_BOOT_ID
     session.modified = True
 
@@ -1401,8 +1692,6 @@ def _sync_pending_chart_session(session_obj, final: dict[str, Any]) -> None:
         else:
             session_obj.pop("pending_chart", None)
         return
-    if (final.get("question_analysis") or {}).get("intent") == "inst1_chart":
-        session_obj.pop("pending_chart", None)
 
 
 def _sync_pending_aggregate_session(session_obj, final: dict[str, Any]) -> None:
@@ -1431,11 +1720,11 @@ def index():
     return render_template_string(
         PAGE,
         chat_history=[],
-        table_name=TABLE_NAME,
-        inst1_tables=inst1_schema_table_display_items(),
+        inst1_tables=filtered_inst1_table_items(),
         db_configured=db_configured(),
         aws_configured=aws_credentials_configured(),
         member=current_member(),
+        has_pending_chart=session_pending_chart_ready(session),
     )
 
 
@@ -1453,6 +1742,8 @@ def chat_stream():
     history.append({"role": "user", "content": raw})
     session["chat_history"] = history
     session.modified = True
+    save_user_question(raw)
+    allowed_tables = allowed_tables_list()
 
     def generate():
         try:
@@ -1461,6 +1752,7 @@ def chat_stream():
                 "user_message": raw,
                 "table_name": (table_name or "").strip(),
                 "history": history,
+                "allowed_tables": allowed_tables,
                 "summary": "",
                 "reply": "",
                 "notice": "",
@@ -1472,10 +1764,11 @@ def chat_stream():
                 "inst1_queries": {},
                 "extract_tables": [],
                 "pending_aggregate": session.get("pending_aggregate") or {},
-                "pending_chart": session.get("pending_chart") or {},
+                "pending_chart": get_session_pending_chart(session),
                 "chart_specs": [],
-                "chart_available": False,
+                "chart_type_options": [],
                 "schema_pipeline_notice": "",
+                "schema_pipeline_ran": False,
             }
             final: dict[str, Any] = {}
             for chunk in executor.stream(initial, stream_mode="updates"):
@@ -1520,7 +1813,13 @@ def chat_stream():
             report_export = _client_report_export(dict(final.get("report_export") or {}))
             _sync_pending_aggregate_session(session, final)
             _sync_pending_chart_session(session, final)
-            chart_available = _chart_available_from_final(final)
+            chart_type_options = _chart_type_options_from_final(final)
+            _sync_inst1_extract_bundle(
+                session,
+                final,
+                inst1_data=inst1_data,
+                excel_export=excel_export,
+            )
             history.append(
                 {
                     "role": "assistant",
@@ -1537,7 +1836,7 @@ def chat_stream():
                     "aggregate_column_pick_mode": aggregate_column_pick_mode,
                     "excel_export": excel_export,
                     "report_export": report_export,
-                    "chart_available": chart_available,
+                    "chart_type_options": chart_type_options,
                     "schema_pipeline_notice": schema_pipeline_notice,
                 }
             )
@@ -1563,7 +1862,8 @@ def chat_stream():
                     "aggregate_column_pick_mode": aggregate_column_pick_mode,
                     "excel_export": excel_export,
                     "report_export": report_export,
-                    "chart_available": chart_available,
+                    "chart_type_options": chart_type_options,
+                    "pending_chart_ready": session_pending_chart_ready(session),
                 }
             )
         except Exception as e:
@@ -1590,6 +1890,23 @@ def clear_chat():
     return redirect(url_for("index"))
 
 
+@app.route("/api/questions", methods=["GET"])
+def api_questions():
+    """로그인 사용자의 질문 내역 (최신순)."""
+    member_id = session.get("member_id")
+    if not member_id:
+        return jsonify({"ok": False, "error": "로그인이 필요합니다."}), 401
+    if not db_configured():
+        return jsonify({"ok": True, "questions": []})
+    try:
+        with get_conn() as conn:
+            questions = fetch_recent_questions(conn, member_id=member_id, limit=15)
+        return jsonify({"ok": True, "questions": questions})
+    except Exception:
+        app.logger.exception("질문 내역 조회 실패")
+        return jsonify({"ok": True, "questions": []})
+
+
 @app.route("/api/health", methods=["GET"])
 def api_health():
     out: dict = {
@@ -1610,6 +1927,7 @@ def api_health():
             "column_desc",
             "data_summary",
             "chart",
+            "external_insight",
             "fetch_inst1",
             "format_inst1",
             "general",
@@ -1641,9 +1959,6 @@ def api_health():
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                     cur.fetchone()
-                    cur.execute(f'SELECT COUNT(*) FROM public."{TABLE_NAME}"')
-                    out["table_row_count"] = cur.fetchone()[0]
-                    out["table_name"] = TABLE_NAME
             out["db_ok"] = True
         except Exception as e:
             out["db_ok"] = False

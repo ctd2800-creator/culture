@@ -25,19 +25,25 @@ from schema_vector.config import (
     opensearch_index,
     schema_vector_enabled,
 )
-from schema_vector.metadata_extract import enrich_with_instance_ids, extract_table_metadata
+from schema_vector.metadata_extract import (
+    enrich_with_column_definitions,
+    enrich_with_instance_ids,
+    extract_table_metadata,
+)
 from schema_vector.sentences import build_schema_documents
 
 
 def _connect_db():
-    from supabase.culture_db import connect_culture_db
+    from culture_db.culture_db import connect_culture_db
 
     return connect_culture_db(connect_timeout=30)
 
 
 def cmd_extract(conn, schemas: list[str], out: Path | None) -> list:
     tables = extract_table_metadata(conn, schemas)
-    tables = [enrich_with_instance_ids(t) for t in tables]
+    tables = [
+        enrich_with_instance_ids(enrich_with_column_definitions(t)) for t in tables
+    ]
     print(f"extracted {len(tables)} tables from schemas {schemas}")
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)

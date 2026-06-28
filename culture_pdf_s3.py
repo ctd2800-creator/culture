@@ -186,8 +186,19 @@ def _rgba_to_mpl(color: str, fallback: str) -> str:
     return fallback
 
 
-def _render_chart_png(spec: dict[str, Any]) -> bytes:
-    """Chart.js 스펙과 동일한 막대그래프를 PNG로 렌더."""
+def _chart_slice_colors_mpl(count: int) -> list:
+    """원형차트용 팔레트 — 화면 차트(Chart.js)와 동일한 다채로운 색상."""
+    palette = [
+        "#FFCC00", "#5C4B3C", "#FF9F40", "#4BC0C0", "#9966FF",
+        "#FF6384", "#36A2EB", "#C9CBCF", "#8BC34A", "#E91E63",
+    ]
+    if count <= 0:
+        return []
+    return [palette[i % len(palette)] for i in range(count)]
+
+
+def _render_chart_png(spec: dict[str, Any], *, show_title: bool = True) -> bytes:
+    """Chart.js 스펙(type: bar/line/pie/doughnut)을 PNG로 렌더."""
     _ensure_matplotlib()
     import matplotlib.pyplot as plt
 
@@ -201,23 +212,95 @@ def _render_chart_png(spec: dict[str, Any]) -> bytes:
         labels, values = labels[:n], values[:n]
 
     ds0 = datasets[0]
-    bar_color = _rgba_to_mpl(str(ds0.get("backgroundColor") or ""), "#FFCC00")
-    edge_color = _rgba_to_mpl(str(ds0.get("borderColor") or ""), "#5C4B3C")
+    chart_type = str(spec.get("type") or "bar").strip().lower()
     y_label = str(ds0.get("label") or "값")
-    title = str(spec.get("title") or "막대그래프")
+    title = str(spec.get("title") or "차트")
+    ko_font = _korean_font_properties()
+    multi = len(datasets) > 1
+
+    if chart_type in ("pie", "doughnut"):
+        fig, ax = plt.subplots(figsize=(7.0, 5.0), dpi=120)
+        colors = _chart_slice_colors_mpl(len(values))
+        wedge_args = {"width": 0.42} if chart_type == "doughnut" else {}
+        wedges, _texts, autotexts = ax.pie(
+            values,
+            colors=colors,
+            autopct=lambda p: f"{p:.1f}%" if p >= 3 else "",
+            startangle=90,
+            counterclock=False,
+            wedgeprops={"edgecolor": "white", "linewidth": 1, **wedge_args},
+        )
+        for at in autotexts:
+            at.set_fontsize(8)
+            at.set_fontproperties(ko_font)
+        ax.legend(
+            wedges, labels, loc="center left", bbox_to_anchor=(1.0, 0.5),
+            fontsize=8, prop=ko_font,
+        )
+        ax.axis("equal")
+        if show_title:
+            ax.set_title(title, fontsize=11, pad=12, fontproperties=ko_font)
+        fig.tight_layout()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
 
     label_count = max(len(labels), 1)
     fig_w = max(8.0, min(14.0, label_count * 0.55))
     fig, ax = plt.subplots(figsize=(fig_w, 4.2), dpi=120)
     x = range(len(labels))
-    ax.bar(x, values, color=bar_color, edgecolor=edge_color, linewidth=0.8)
-    ko_font = _korean_font_properties()
+
+    def _dataset_values(ds: dict[str, Any]) -> list[float]:
+        vals = [float(v) for v in (ds.get("data") or [])]
+        if len(vals) != len(labels):
+            n = min(len(vals), len(labels))
+            vals = vals[:n] + [0.0] * (len(labels) - n)
+        return vals
+
+    _palette = ("#FFCC00", "#5C4B3C", "#FF9F40", "#4BC0C0", "#9966FF", "#FF6384")
+
+    if chart_type == "line":
+        for idx, ds in enumerate(datasets):
+            line_color = _rgba_to_mpl(
+                str(ds.get("borderColor") or ""), _palette[idx % len(_palette)]
+            )
+            point_color = _rgba_to_mpl(
+                str(ds.get("pointBackgroundColor") or ""), line_color
+            )
+            ax.plot(
+                list(x), _dataset_values(ds), color=line_color, linewidth=2,
+                marker="o", markersize=5, markerfacecolor=point_color,
+                markeredgecolor=line_color,
+                label=str(ds.get("label") or f"항목 {idx + 1}"),
+            )
+    else:
+        n_ds = len(datasets)
+        total_width = 0.8
+        bar_width = total_width / n_ds if n_ds else total_width
+        for idx, ds in enumerate(datasets):
+            bar_color = _rgba_to_mpl(
+                str(ds.get("backgroundColor") or ""), _palette[idx % len(_palette)]
+            )
+            edge_color = _rgba_to_mpl(str(ds.get("borderColor") or ""), "#5C4B3C")
+            offset = (idx - (n_ds - 1) / 2) * bar_width
+            positions = [xi + offset for xi in x]
+            ax.bar(
+                positions, _dataset_values(ds), width=bar_width,
+                color=bar_color, edgecolor=edge_color, linewidth=0.8,
+                label=str(ds.get("label") or f"항목 {idx + 1}"),
+            )
+
     ax.set_xticks(list(x))
     ax.set_xticklabels(
         labels, rotation=45, ha="right", fontsize=8, fontproperties=ko_font
     )
-    ax.set_ylabel(y_label, fontsize=9, fontproperties=ko_font)
-    ax.set_title(title, fontsize=11, pad=12, fontproperties=ko_font)
+    ax.set_ylabel("값" if multi else y_label, fontsize=9, fontproperties=ko_font)
+    if multi:
+        ax.legend(fontsize=8, prop=ko_font)
+    if show_title:
+        ax.set_title(title, fontsize=11, pad=12, fontproperties=ko_font)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
     ax.set_axisbelow(True)
     fig.tight_layout()
@@ -356,13 +439,14 @@ def report_has_data(report: dict[str, Any]) -> bool:
 
 
 def save_report_to_disk(content: bytes, filename: str) -> Path | None:
-    """로컬 PC culture/reports에 PDF 저장. Vercel 등 읽기 전용 FS에서는 None."""
+    """로컬 PC culture/reports에 보고서 저장. Vercel 등 읽기 전용 FS에서는 None."""
     if os.environ.get("VERCEL"):
         return None
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.pdf"
-    if not name.lower().endswith(".pdf"):
-        name += ".pdf"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "culture_report.docx"
+    lower = name.lower()
+    if not (lower.endswith(".docx") or lower.endswith(".pptx") or lower.endswith(".pdf")):
+        name += ".docx"
     path = REPORT_DIR / name
     path.write_bytes(content)
     return path.resolve()

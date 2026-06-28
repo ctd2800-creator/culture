@@ -1,11 +1,12 @@
 .vercel
 .env
 .env.local
-supabase/.env.local
+culture_db/.env.local
 .aurora_password.tmp
 
 exports/
 reports/
+.flask_session/
 
 __pycache__/
 *.py[cod]

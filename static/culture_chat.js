@@ -11,6 +11,112 @@ window.CultureChat = {
     const sendBtn = document.getElementById("sendBtn");
     const statusLine = document.getElementById("statusLine");
     const chatNotice = document.getElementById("chatNotice");
+    let pendingChartReady = !!opts.hasPendingChart;
+    let liveChatHistory = (opts.history || []).map((item) => ({
+      role: item.role,
+      content: item.content || "",
+      charts: [...(item.charts || [])],
+      inst1_data: item.inst1_data || {},
+      inst1_column_orders: item.inst1_column_orders || {},
+      inst1_result_labels: item.inst1_result_labels || {},
+      inst1_queries: item.inst1_queries || {},
+      report_export: item.report_export || null,
+    }));
+
+    function snapshotAssistantMessage(payload, textFallback) {
+      return {
+        role: "assistant",
+        content: payload.reply || payload.text || textFallback || "",
+        charts: [...(payload.charts || [])],
+        inst1_data: payload.inst1_data || {},
+        inst1_column_orders: payload.inst1_column_orders || {},
+        inst1_result_labels: payload.inst1_result_labels || {},
+        inst1_queries: payload.inst1_queries || {},
+        report_export: payload.report_export || null,
+      };
+    }
+
+    function appendChartsToLastAssistant(charts) {
+      if (!charts || !charts.length) return;
+      for (let i = liveChatHistory.length - 1; i >= 0; i--) {
+        if (liveChatHistory[i].role === "assistant") {
+          liveChatHistory[i].charts = [
+            ...(liveChatHistory[i].charts || []),
+            ...charts,
+          ];
+          break;
+        }
+      }
+    }
+
+    const ANALYSIS_REQUEST_HINTS = [
+      "외부요인",
+      "외부 요인",
+      "외부정보",
+      "외부 정보",
+      "시장 동향",
+      "시장동향",
+      "경제 동향",
+      "정책 동향",
+      "결합해 분석",
+      "결합하여 분석",
+      "결합 분석",
+      "인사이트",
+      "외부요인과 결합",
+    ];
+    const CHART_REQUEST_HINTS = ["차트", "그래프", "막대", "시각화", "그려", "chart"];
+    const ANALYSIS_FOLLOW_UP = "결과를 외부요인과 결합해 분석해줘";
+    const CHART_FOLLOW_UP = "조회한 집계 데이터로 차트를 그려드릴까요?";
+
+    function isAnalysisRequest(text) {
+      const m = (text || "").trim();
+      if (!m) return false;
+      if (m === ANALYSIS_FOLLOW_UP) return true;
+      if (ANALYSIS_REQUEST_HINTS.some((h) => m.includes(h))) return true;
+      if (/결합.{0,12}분석/.test(m)) return true;
+      if (/외부.{0,8}(요인|정보).{0,12}분석/.test(m)) return true;
+      return false;
+    }
+
+    function isChartRequest(text) {
+      const m = (text || "").trim();
+      if (!m) return false;
+      if (m === CHART_FOLLOW_UP) return true;
+      const lower = m.toLowerCase();
+      return CHART_REQUEST_HINTS.some((h) => lower.includes(h.toLowerCase()));
+    }
+
+    function initialGeneratingStatus(text) {
+      if (pendingChartReady && isAnalysisRequest(text)) {
+        return (
+          "[호출 에이전트: 분석 에이전트]\n" +
+          "직전 집계 결과를 바탕으로 외부요인과 결합해 분석하고 있습니다."
+        );
+      }
+      if (pendingChartReady && isChartRequest(text)) {
+        return (
+          "[호출 에이전트: 차트 에이전트]\n" +
+          "집계 결과 차트를 준비하고 있습니다."
+        );
+      }
+      return "답변을 준비하고 있습니다…";
+    }
+
+    function syncPendingChartReady(data) {
+      if (typeof data?.pending_chart_ready === "boolean") {
+        pendingChartReady = data.pending_chart_ready;
+        return;
+      }
+      const inst1 = data?.inst1_data;
+      if (!inst1 || typeof inst1 !== "object") return;
+      for (const key of Object.keys(inst1)) {
+        const block = inst1[key];
+        if (block && Array.isArray(block.rows) && block.rows.length) {
+          pendingChartReady = true;
+          return;
+        }
+      }
+    }
 
     if (!chatBox || !messageInput || !sendBtn) {
       console.error("CultureChat: DOM elements missing");
@@ -172,10 +278,9 @@ window.CultureChat = {
     }
 
     const FALLBACK_STATUS_MESSAGES = [
-      "[호출 에이전트: 질문 분석 에이전트]\n질문 의도를 파악하고, 조회·집계·요약 중 어떤 분석이 필요한지 판단하고 있습니다.",
-      "[호출 에이전트: 데이터 추출 에이전트]\nSQL을 생성하고 그룹고객 데이터를 조회하고 있습니다.",
-      "[호출 에이전트: 데이터 요약 에이전트]\n조회된 데이터를 분석하여 핵심 내용을 요약하고 있습니다.",
-      "[호출 에이전트: 응답 조립]\n분석 결과를 모아 최종 답변을 완성하고 있습니다.",
+      "답변을 준비하고 있습니다…",
+      "데이터를 조회·분석하고 있습니다…",
+      "결과를 정리하고 있습니다…",
     ];
 
     function createTypingController(textEl) {
@@ -231,15 +336,64 @@ window.CultureChat = {
       state.el.classList.remove("generating");
     }
 
-    function renderCharts(container, charts) {
+    function messageTailAnchor(container) {
+      return (
+        container.querySelector("[data-chart-type-picker]") ||
+        container.querySelector(".msg-follow-up:not(.msg-chart-type-picker)")
+      );
+    }
+
+    function appendBeforeMessageTail(container, node) {
+      const anchor = messageTailAnchor(container);
+      if (anchor) container.insertBefore(node, anchor);
+      else container.appendChild(node);
+    }
+
+    function sanitizeChartFilename(title) {
+      const raw = String(title || "culture_chart").trim();
+      const safe = raw.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 80);
+      const base = safe || "culture_chart";
+      return base.toLowerCase().endsWith(".png") ? base : base + ".png";
+    }
+
+    function downloadChartImage(chartInstance, canvas, title) {
+      let dataUrl = "";
+      try {
+        if (chartInstance && typeof chartInstance.toBase64Image === "function") {
+          dataUrl = chartInstance.toBase64Image("image/png", 1);
+        }
+      } catch (_) {
+        /* fallback below */
+      }
+      if (!dataUrl && canvas) {
+        dataUrl = canvas.toDataURL("image/png");
+      }
+      if (!dataUrl) {
+        throw new Error("차트 이미지를 생성할 수 없습니다.");
+      }
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = sanitizeChartFilename(title);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function renderCharts(container, charts, options) {
       if (!charts || !charts.length || typeof Chart === "undefined") return;
+      const opts = options || {};
       charts.forEach((spec) => {
+        const chartType = spec.type || "bar";
+        const isRadial = chartType === "pie" || chartType === "doughnut";
+        const titleText = spec.title || "차트";
         const block = document.createElement("div");
         block.className = "chart-block";
-        const title = document.createElement("p");
-        title.className = "chart-title";
-        title.textContent = spec.title || "막대그래프";
-        block.appendChild(title);
+        if (!opts.hideTitle) {
+          const title = document.createElement("p");
+          title.className = "chart-title";
+          title.textContent = titleText;
+          block.appendChild(title);
+        }
         const wrap = document.createElement("div");
         wrap.className = "chart-canvas-wrap";
         const canvas = document.createElement("canvas");
@@ -247,26 +401,113 @@ window.CultureChat = {
         canvas.id = canvasId;
         wrap.appendChild(canvas);
         block.appendChild(wrap);
-        container.appendChild(block);
-        new Chart(canvas, {
-          type: spec.type || "bar",
+        let saveBtn = null;
+        if (!opts.hideSave) {
+          const actions = document.createElement("div");
+          actions.className = "chart-block-actions";
+          saveBtn = document.createElement("button");
+          saveBtn.type = "button";
+          saveBtn.className = "btn-chart-image-save";
+          saveBtn.textContent = "이미지 저장";
+          actions.appendChild(saveBtn);
+          block.appendChild(actions);
+        }
+        appendBeforeMessageTail(container, block);
+        const datasets = spec.datasets || [];
+        const measureName = isRadial && datasets.length ? datasets[0].label : "";
+        const chartInstance = new Chart(canvas, {
+          type: chartType,
           data: {
             labels: spec.labels || [],
-            datasets: spec.datasets || [],
+            datasets: datasets,
           },
           options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-              legend: { display: (spec.datasets || []).length > 1 },
+              legend: { display: isRadial || datasets.length > 1 },
+              title: isRadial && measureName
+                ? { display: true, text: measureName, font: { size: 14 } }
+                : { display: false },
             },
-            scales: {
-              y: { beginAtZero: true },
-            },
+            ...(isRadial ? {} : { scales: { y: { beginAtZero: true } } }),
           },
         });
+        if (saveBtn) {
+          saveBtn.addEventListener("click", () => {
+            const prev = saveBtn.textContent;
+            saveBtn.disabled = true;
+            saveBtn.textContent = "저장 중…";
+            try {
+              downloadChartImage(chartInstance, canvas, titleText);
+            } catch (err) {
+              alert(err.message || String(err));
+            } finally {
+              saveBtn.disabled = false;
+              saveBtn.textContent = prev;
+            }
+          });
+        }
       });
       scrollChatToBottom();
+    }
+
+    function renderChartTypePicker(container, options) {
+      if (!options || !options.length || container.querySelector("[data-chart-type-picker]")) {
+        return;
+      }
+      const block = document.createElement("div");
+      block.className = "msg-follow-up msg-chart-type-picker";
+      block.dataset.chartTypePicker = "1";
+      const labelEl = document.createElement("p");
+      labelEl.className = "follow-up-label";
+      labelEl.textContent = "차트 유형 선택";
+      block.appendChild(labelEl);
+      options.forEach((opt) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "follow-up-chip chart-type-chip";
+        btn.textContent = opt.label || opt.id || "차트";
+        btn.addEventListener("click", () => selectChartType(container, opt.id, btn, block));
+        block.appendChild(btn);
+      });
+      container.appendChild(block);
+      scrollChatToBottom();
+    }
+
+    async function selectChartType(container, chartType, btn, block) {
+      const buttons = block?.querySelectorAll("button") || [];
+      buttons.forEach((b) => {
+        b.disabled = true;
+      });
+      const prev = btn?.textContent;
+      if (btn) btn.textContent = "생성 중…";
+      try {
+        const res = await fetch("/api/generate/chart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ chart_type: chartType }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || "차트 생성 실패 (" + res.status + ")");
+        }
+        if (data.charts && data.charts.length) {
+          renderCharts(container, data.charts);
+          appendChartsToLastAssistant(data.charts);
+        }
+        buttons.forEach((b) => {
+          b.disabled = false;
+        });
+        if (btn) btn.textContent = prev;
+      } catch (err) {
+        if (btn) btn.textContent = prev;
+        buttons.forEach((b) => {
+          b.disabled = false;
+        });
+        alert(err.message || String(err));
+      }
     }
 
     const inst1Tables = Array.isArray(opts.inst1Tables) ? opts.inst1Tables : [];
@@ -280,10 +521,13 @@ window.CultureChat = {
       if (item.table !== "TSHDE0ZCD") INST1_DATA_TABLE_ORDER.push(item.table);
     });
     if (!INST1_DATA_TABLE_ORDER.length) {
-      INST1_DATA_TABLE_ORDER.push("TSHDEOA01", "TSHDEOA02", "TSHDEOA04");
+      INST1_DATA_TABLE_ORDER.push("TSHDEOA01", "TSHDEOA02", "TSHDEOA03", "TSHDEOA04", "TSHDEOA05", "TSHDEOA06");
       INST1_TABLE_LABELS.TSHDEOA01 = "그룹고객기본정보";
       INST1_TABLE_LABELS.TSHDEOA02 = "그룹고객거래기본";
+      INST1_TABLE_LABELS.TSHDEOA03 = "그룹고객연락처정보";
       INST1_TABLE_LABELS.TSHDEOA04 = "그룹고객소득대출정보";
+      INST1_TABLE_LABELS.TSHDEOA05 = "그룹계열사마케팅정보";
+      INST1_TABLE_LABELS.TSHDEOA06 = "그룹신용등급정보";
     }
 
     function inst1ResultLabel(key, labels) {
@@ -362,6 +606,17 @@ window.CultureChat = {
 
     function displayCellValue(column, value) {
       if (isCustomerIdColumn(column)) return maskCustomerId(value);
+      if (column === "전월대비증감") {
+        if (value === null || value === undefined || value === "") return "-";
+        if (isNumericCellValue(value)) {
+          const num = Number(value);
+          const formatted = formatNumericDisplay(Math.abs(num));
+          const body = formatted !== null ? formatted : String(Math.abs(num));
+          if (num > 0) return "▲ " + body;
+          if (num < 0) return "▼ " + body;
+          return "0";
+        }
+      }
       if (!isCodeLikeColumn(column) && isNumericCellValue(value)) {
         const formatted = formatNumericDisplay(value);
         if (formatted !== null) return formatted;
@@ -376,11 +631,120 @@ window.CultureChat = {
           : rows.length
             ? Object.keys(rows[0])
             : [];
-      if (!cols.includes("고객수")) return cols;
-      return cols.filter((c) => c !== "고객수").concat(["고객수"]);
+      const trailing = ["고객수", "전월대비증감"].filter((c) => cols.includes(c));
+      if (!trailing.length) return cols;
+      return cols.filter((c) => !trailing.includes(c)).concat(trailing);
     }
 
-    function renderInst1Tables(container, inst1Data, inst1Queries, inst1ColumnOrders, inst1ResultLabels) {
+    // 연속된 동일 값 셀을 세로 병합(rowspan). 왼쪽 컬럼부터 계층적으로 적용해
+    // 상위 그룹이 같을 때만 병합되도록 한다(예: 기준년월이 같은 구간만 합침).
+    function computeRowSpans(rows, cols) {
+      const n = rows.length;
+      const spans = rows.map(() => cols.map(() => 1));
+      // 집계값/측정값 컬럼은 병합하지 않는다.
+      const noMerge = new Set(["고객수", "전월대비증감"]);
+      cols.forEach((col, cIdx) => {
+        if (noMerge.has(col) || cIdx === cols.length - 1) return;
+        let start = 0;
+        while (start < n) {
+          let end = start + 1;
+          while (
+            end < n &&
+            sameCell(rows[end][col], rows[start][col]) &&
+            parentGroupsMatch(rows, cols, cIdx, end, start)
+          ) {
+            end += 1;
+          }
+          const groupLen = end - start;
+          if (groupLen > 1) {
+            spans[start][cIdx] = groupLen;
+            for (let r = start + 1; r < end; r += 1) spans[r][cIdx] = 0;
+          }
+          start = end;
+        }
+      });
+      return spans;
+
+      function sameCell(a, b) {
+        return String(a == null ? "" : a) === String(b == null ? "" : b);
+      }
+      function parentGroupsMatch(rowsArr, colArr, cIdx, r1, r2) {
+        for (let p = 0; p < cIdx; p += 1) {
+          if (!sameCell(rowsArr[r1][colArr[p]], rowsArr[r2][colArr[p]])) {
+            return false;
+          }
+        }
+        return true;
+      }
+    }
+
+    // 보고서 전용 '보고서 제목: ...' 라인은 채팅 화면에서 숨긴다.
+    function stripReportTitleLine(content) {
+      if (!content) return content;
+      const lines = content.split("\n");
+      const kept = lines.filter(
+        (line) => !/^\s*보고서\s*제목\s*[:：]/.test(line)
+      );
+      return kept.join("\n").replace(/^\n+/, "");
+    }
+
+    // 분석 에이전트 본문을 '외부 환경 연결' 기준으로 head/tail 분리.
+    function splitAnalysisContent(content) {
+      const text = content || "";
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        const norm = lines[i].replace(/[#*\-0-9.()[\]\s]/g, "");
+        if (norm.indexOf("외부환경연결") === 0 && norm.length <= "외부환경연결".length + 2) {
+          return {
+            head: lines.slice(0, i).join("\n").trimEnd(),
+            tail: lines.slice(i).join("\n").trim(),
+          };
+        }
+      }
+      return { head: text, tail: "" };
+    }
+
+    function hasInst1Rows(inst1Data) {
+      if (!inst1Data || typeof inst1Data !== "object") return false;
+      return Object.keys(inst1Data).some((k) => {
+        const v = inst1Data[k];
+        return Array.isArray(v) ? v.length : v && Array.isArray(v.rows) && v.rows.length;
+      });
+    }
+
+    // 분석 에이전트 메시지: 요약 → 표·차트 → 외부 환경 연결~ 순으로 렌더.
+    // 반환값 true면 호출부에서 별도 표/차트 렌더를 생략한다.
+    function renderAnalysisLayout(el, textEl, displayContent, media) {
+      const inst1Data = media.inst1Data || {};
+      const isAnalysis =
+        displayContent &&
+        displayContent.indexOf("외부 환경 연결") !== -1 &&
+        hasInst1Rows(inst1Data);
+      if (!isAnalysis) return false;
+      const parts = splitAnalysisContent(displayContent);
+      if (textEl) textEl.textContent = parts.head;
+      renderInst1Tables(
+        el,
+        inst1Data,
+        null,
+        media.inst1ColumnOrders || null,
+        media.inst1ResultLabels || null,
+        { hideSql: true, hideTitle: true }
+      );
+      if (media.charts && media.charts.length) {
+        renderCharts(el, media.charts, { hideTitle: true, hideSave: true });
+      }
+      if (parts.tail) {
+        const tailEl = document.createElement("div");
+        tailEl.className = "msg-text msg-analysis-tail";
+        tailEl.textContent = parts.tail;
+        el.appendChild(tailEl);
+      }
+      return true;
+    }
+
+    function renderInst1Tables(container, inst1Data, inst1Queries, inst1ColumnOrders, inst1ResultLabels, options) {
+      const opts = options || {};
       const data = inst1Data && typeof inst1Data === "object" ? inst1Data : {};
       const queries = inst1Queries && typeof inst1Queries === "object" ? inst1Queries : {};
       const tableNames = [...new Set([...Object.keys(queries), ...Object.keys(data)])];
@@ -389,16 +753,18 @@ window.CultureChat = {
         const displayName = inst1ResultLabel(tableName, inst1ResultLabels);
         const rows = data[tableName] || [];
         const sql = queries[tableName] || "";
-        if (sql) {
+        if (sql && !opts.hideSql) {
           renderInst1Sql(container, tableName, sql, displayName);
         }
         if (!rows.length) return;
         const block = document.createElement("div");
         block.className = "inst1-table-block";
-        const title = document.createElement("p");
-        title.className = "chart-title";
-        title.textContent = displayName + " — 조회 결과 (" + rows.length + "건)";
-        block.appendChild(title);
+        if (!opts.hideTitle) {
+          const title = document.createElement("p");
+          title.className = "chart-title";
+          title.textContent = displayName + " — 조회 결과 (" + rows.length + "건)";
+          block.appendChild(title);
+        }
         const wrap = document.createElement("div");
         wrap.className = "inst1-table-wrap";
         const tbl = document.createElement("table");
@@ -414,12 +780,18 @@ window.CultureChat = {
         thead.appendChild(hr);
         tbl.appendChild(thead);
         const tbody = document.createElement("tbody");
-        rows.forEach((row) => {
+        const spans = computeRowSpans(rows, cols);
+        rows.forEach((row, rIdx) => {
           const tr = document.createElement("tr");
-          cols.forEach((c) => {
+          cols.forEach((c, cIdx) => {
+            const span = spans[rIdx][cIdx];
+            if (span === 0) return;
             const td = document.createElement("td");
-            const v = row[c];
-            td.textContent = displayCellValue(c, v);
+            td.textContent = displayCellValue(c, row[c]);
+            if (span > 1) {
+              td.rowSpan = span;
+              td.classList.add("inst1-cell-merged");
+            }
             tr.appendChild(td);
           });
           tbody.appendChild(tr);
@@ -443,10 +815,9 @@ window.CultureChat = {
       if (container.querySelector("[data-action-bar]")) return;
       const excelExport = options.excelExport;
       const reportExport = options.reportExport;
-      const chartAvailable = !!options.chartAvailable;
       const hasExcel = hasExcelExportData(excelExport);
       const hasReport = hasReportExportData(reportExport);
-      if (!hasExcel && !hasReport && !chartAvailable) return;
+      if (!hasExcel && !hasReport) return;
 
       const bar = document.createElement("div");
       bar.className = "msg-action-bar";
@@ -462,17 +833,6 @@ window.CultureChat = {
         excelBtn.addEventListener("click", () => downloadExcel(excelExport, excelBtn));
         excelWrap.appendChild(excelBtn);
         bar.appendChild(excelWrap);
-      }
-
-      if (chartAvailable) {
-        const chartBtn = document.createElement("button");
-        chartBtn.type = "button";
-        chartBtn.className = "btn-chart-generate";
-        chartBtn.textContent = "차트 생성";
-        chartBtn.addEventListener("click", () =>
-          generateChart(container, chartBtn, bar)
-        );
-        bar.appendChild(chartBtn);
       }
 
       if (hasReport) {
@@ -516,42 +876,10 @@ window.CultureChat = {
       newBtn.addEventListener("click", () => downloadReport(reportExport, newBtn));
     }
 
-    async function generateChart(container, btn, bar) {
-      const prev = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "생성 중…";
-      try {
-        const res = await fetch("/api/generate/chart", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "same-origin",
-          body: "{}",
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
-          throw new Error(data.error || "차트 생성 실패 (" + res.status + ")");
-        }
-        if (data.charts && data.charts.length) {
-          renderCharts(container, data.charts);
-        }
-        btn.remove();
-      } catch (err) {
-        btn.textContent = prev;
-        alert(err.message || String(err));
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    function renderExcelExport(container, excelExport) {
-      /* unified action bar handles excel button */
-    }
-
     function renderExcelButton(container, excelExport) {
       renderActionBar(container, {
         excelExport,
         reportExport: null,
-        chartAvailable: false,
       });
     }
 
@@ -617,18 +945,18 @@ window.CultureChat = {
     }
 
     function hasReportExportData(reportExport) {
+      const agent = reportExport && reportExport.agent;
       return !!(
         reportExport &&
-        reportExport.agent === "inst1_data_summary" &&
+        (agent === "inst1_data_summary" || agent === "inst1_external_insight") &&
         (reportExport.content || reportExport.summary)
       );
     }
 
-    function renderReportExport(container, reportExport, chartAvailable, excelExport) {
+    function renderReportExport(container, reportExport, excelExport) {
       renderActionBar(container, {
         excelExport: excelExport || null,
         reportExport,
-        chartAvailable: !!chartAvailable,
       });
     }
 
@@ -636,7 +964,6 @@ window.CultureChat = {
       renderActionBar(container, {
         excelExport: null,
         reportExport,
-        chartAvailable: false,
       });
     }
 
@@ -651,7 +978,12 @@ window.CultureChat = {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
-          body: JSON.stringify({ report: reportData }),
+          body: JSON.stringify({
+            use_session: true,
+            messages: liveChatHistory,
+            report: reportData || undefined,
+            filename: (reportData && reportData.filename) || undefined,
+          }),
         });
         const contentType = res.headers.get("Content-Type") || "";
         if (!res.ok || contentType.includes("application/json")) {
@@ -666,14 +998,19 @@ window.CultureChat = {
         }
         const blob = await res.blob();
         if (!blob || blob.size < 100) {
-          throw new Error("생성된 PDF 파일이 비어 있습니다.");
+          throw new Error("생성된 보고서 파일이 비어 있습니다.");
         }
-        let filename = reportData.filename || "culture_report.pdf";
+        let filename = (reportData && reportData.filename) || "culture_report.docx";
         filename = filename.replace(/[^A-Za-z0-9._-]/g, "_");
-        if (!filename.toLowerCase().endsWith(".pdf")) filename += ".pdf";
+        if (filename.toLowerCase().endsWith(".pptx")) {
+          filename = filename.slice(0, -5) + ".docx";
+        }
+        if (!filename.toLowerCase().endsWith(".docx")) filename += ".docx";
         const savedPath = res.headers.get("X-Saved-Path") || "";
-        const pdfBlob = new Blob([blob], { type: "application/pdf" });
-        const url = URL.createObjectURL(pdfBlob);
+        const docBlob = new Blob([blob], {
+          type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        });
+        const url = URL.createObjectURL(docBlob);
         const a = document.createElement("a");
         a.href = url;
         a.download = filename;
@@ -727,7 +1064,7 @@ window.CultureChat = {
       followUpQuestions,
       excelExport,
       reportExport,
-      chartAvailable,
+      chartTypeOptions,
       aggregateColumnOptions,
       aggregateColumnLabel,
       aggregateColumnPickMode,
@@ -739,35 +1076,42 @@ window.CultureChat = {
       const textEl = document.createElement("div");
       textEl.className = "msg-text";
       const followUp = resolveFollowUpQuestions(content, followUpQuestions);
-      textEl.textContent = followUp.displayContent;
+      const displayText = stripReportTitleLine(followUp.displayContent);
+      textEl.textContent = displayText;
       el.appendChild(textEl);
       if (role === "assistant" && schemaPipelineNotice) {
         renderSchemaPipelineNotice(el, schemaPipelineNotice);
       }
-      if (role === "assistant" && charts && charts.length) {
-        renderCharts(el, charts);
+      const analysisHandled =
+        role === "assistant" &&
+        renderAnalysisLayout(el, textEl, displayText, {
+          charts,
+          inst1Data,
+          inst1ColumnOrders,
+          inst1ResultLabels,
+        });
+      if (role === "assistant" && !analysisHandled) {
+        if (inst1Data || inst1Queries) {
+          renderInst1Tables(
+            el,
+            inst1Data || {},
+            inst1Queries || null,
+            inst1ColumnOrders || null,
+            inst1ResultLabels || null
+          );
+        }
+        if (charts && charts.length) {
+          renderCharts(el, charts);
+        }
       }
       if (role === "assistant" && pdfUrl) {
         renderPdfLink(el, pdfUrl);
-      }
-      if (role === "assistant" && (inst1Data || inst1Queries)) {
-        renderInst1Tables(
-          el,
-          inst1Data || {},
-          inst1Queries || null,
-          inst1ColumnOrders || null,
-          inst1ResultLabels || null
-        );
       }
       if (role === "assistant") {
         renderActionBar(el, {
           excelExport,
           reportExport,
-          chartAvailable: !!chartAvailable,
         });
-      }
-      if (role === "assistant" && followUp.questions.length) {
-        renderFollowUpQuestions(el, followUp.questions);
       }
       if (role === "assistant" && aggregateColumnOptions && aggregateColumnOptions.length) {
         renderAggregateColumnOptions(
@@ -776,6 +1120,12 @@ window.CultureChat = {
           aggregateColumnLabel,
           aggregateColumnPickMode
         );
+      }
+      if (role === "assistant" && chartTypeOptions && chartTypeOptions.length) {
+        renderChartTypePicker(el, chartTypeOptions);
+      }
+      if (role === "assistant" && followUp.questions.length) {
+        renderFollowUpQuestions(el, followUp.questions);
       }
       chatBox.appendChild(el);
       scrollChatToBottom();
@@ -807,7 +1157,7 @@ window.CultureChat = {
           item.follow_up_questions || [],
           item.excel_export || null,
           item.report_export || null,
-          item.chart_available || false,
+          item.chart_type_options || [],
           item.aggregate_column_options || [],
           item.aggregate_column_label || "",
           item.aggregate_column_pick_mode || "append",
@@ -841,28 +1191,9 @@ window.CultureChat = {
           throw new Error(payload.text || "오류");
         } else if (payload.type === "done") {
           finishGenerating(state);
+          syncPendingChartReady(payload);
           if (payload.text) state.full = payload.text;
           state.textEl.textContent = state.full;
-          if (payload.charts && payload.charts.length) {
-            renderCharts(state.el, payload.charts);
-          }
-          if (payload.pdf_url) {
-            renderPdfLink(state.el, payload.pdf_url);
-          }
-          if (payload.inst1_data || payload.inst1_queries) {
-            renderInst1Tables(
-              state.el,
-              payload.inst1_data || {},
-              payload.inst1_queries || null,
-              payload.inst1_column_orders || null,
-              payload.inst1_result_labels || null
-            );
-          }
-          renderActionBar(state.el, {
-            excelExport: payload.excel_export,
-            reportExport: payload.report_export,
-            chartAvailable: !!payload.chart_available,
-          });
           const followUp = resolveFollowUpQuestions(
             state.full,
             payload.follow_up_questions
@@ -870,9 +1201,38 @@ window.CultureChat = {
           if (followUp.displayContent !== state.full) {
             state.textEl.textContent = followUp.displayContent;
           }
-          if (followUp.questions.length) {
-            renderFollowUpQuestions(state.el, followUp.questions);
+          const payloadAnalysisHandled = renderAnalysisLayout(
+            state.el,
+            state.textEl,
+            followUp.displayContent,
+            {
+              charts: payload.charts,
+              inst1Data: payload.inst1_data,
+              inst1ColumnOrders: payload.inst1_column_orders,
+              inst1ResultLabels: payload.inst1_result_labels,
+            }
+          );
+          if (!payloadAnalysisHandled) {
+            if (payload.inst1_data || payload.inst1_queries) {
+              renderInst1Tables(
+                state.el,
+                payload.inst1_data || {},
+                payload.inst1_queries || null,
+                payload.inst1_column_orders || null,
+                payload.inst1_result_labels || null
+              );
+            }
+            if (payload.charts && payload.charts.length) {
+              renderCharts(state.el, payload.charts);
+            }
           }
+          if (payload.pdf_url) {
+            renderPdfLink(state.el, payload.pdf_url);
+          }
+          renderActionBar(state.el, {
+            excelExport: payload.excel_export,
+            reportExport: payload.report_export,
+          });
           if (payload.aggregate_column_options && payload.aggregate_column_options.length) {
             renderAggregateColumnOptions(
               state.el,
@@ -884,10 +1244,26 @@ window.CultureChat = {
           if (payload.schema_pipeline_notice) {
             renderSchemaPipelineNotice(state.el, payload.schema_pipeline_notice);
           }
+          if (payload.chart_type_options && payload.chart_type_options.length) {
+            renderChartTypePicker(state.el, payload.chart_type_options);
+          }
+          if (followUp.questions.length) {
+            renderFollowUpQuestions(state.el, followUp.questions);
+          }
           if (payload.notice) {
             chatNotice.textContent = payload.notice;
             chatNotice.style.display = "block";
           }
+          liveChatHistory.push({
+            role: "assistant",
+            content: payload.text || payload.reply || state.full || followUp.displayContent || "",
+            charts: [...(payload.charts || [])],
+            inst1_data: payload.inst1_data || {},
+            inst1_column_orders: payload.inst1_column_orders || {},
+            inst1_result_labels: payload.inst1_result_labels || {},
+            inst1_queries: payload.inst1_queries || {},
+            report_export: payload.report_export || null,
+          });
         }
       }
     }
@@ -928,7 +1304,7 @@ window.CultureChat = {
 
     async function sendViaJson(text, msgParts, state) {
       let fallbackIdx = 0;
-      showGeneratingStatus(state, FALLBACK_STATUS_MESSAGES[0]);
+      showGeneratingStatus(state, initialGeneratingStatus(text));
       const fallbackTimer = setInterval(() => {
         fallbackIdx = (fallbackIdx + 1) % FALLBACK_STATUS_MESSAGES.length;
         showGeneratingStatus(state, FALLBACK_STATUS_MESSAGES[fallbackIdx]);
@@ -944,36 +1320,46 @@ window.CultureChat = {
         if (!res.ok || !data.ok) {
           throw new Error(data.error || "요청 실패 (" + res.status + ")");
         }
+        syncPendingChartReady(data);
         finishGenerating(state);
         state.full = data.reply || "";
         state.textEl.textContent = state.full;
-        if (data.charts && data.charts.length) {
-          renderCharts(state.el, data.charts);
-        }
-        if (data.pdf_url) {
-          renderPdfLink(state.el, data.pdf_url);
-        }
-        if (data.inst1_data || data.inst1_queries) {
-          renderInst1Tables(
-            state.el,
-            data.inst1_data || {},
-            data.inst1_queries || null,
-            data.inst1_column_orders || null,
-            data.inst1_result_labels || null
-          );
-        }
-        renderActionBar(state.el, {
-          excelExport: data.excel_export,
-          reportExport: data.report_export,
-          chartAvailable: !!data.chart_available,
-        });
         const followUp = resolveFollowUpQuestions(state.full, data.follow_up_questions);
         if (followUp.displayContent !== state.full) {
           state.textEl.textContent = followUp.displayContent;
         }
-        if (followUp.questions.length) {
-          renderFollowUpQuestions(state.el, followUp.questions);
+        const dataAnalysisHandled = renderAnalysisLayout(
+          state.el,
+          state.textEl,
+          followUp.displayContent,
+          {
+            charts: data.charts,
+            inst1Data: data.inst1_data,
+            inst1ColumnOrders: data.inst1_column_orders,
+            inst1ResultLabels: data.inst1_result_labels,
+          }
+        );
+        if (!dataAnalysisHandled) {
+          if (data.inst1_data || data.inst1_queries) {
+            renderInst1Tables(
+              state.el,
+              data.inst1_data || {},
+              data.inst1_queries || null,
+              data.inst1_column_orders || null,
+              data.inst1_result_labels || null
+            );
+          }
+          if (data.charts && data.charts.length) {
+            renderCharts(state.el, data.charts);
+          }
         }
+        if (data.pdf_url) {
+          renderPdfLink(state.el, data.pdf_url);
+        }
+        renderActionBar(state.el, {
+          excelExport: data.excel_export,
+          reportExport: data.report_export,
+        });
         if (data.aggregate_column_options && data.aggregate_column_options.length) {
           renderAggregateColumnOptions(
             state.el,
@@ -985,10 +1371,26 @@ window.CultureChat = {
         if (data.schema_pipeline_notice) {
           renderSchemaPipelineNotice(state.el, data.schema_pipeline_notice);
         }
+        if (data.chart_type_options && data.chart_type_options.length) {
+          renderChartTypePicker(state.el, data.chart_type_options);
+        }
+        if (followUp.questions.length) {
+          renderFollowUpQuestions(state.el, followUp.questions);
+        }
         if (data.notice) {
           chatNotice.textContent = data.notice;
           chatNotice.style.display = "block";
         }
+        liveChatHistory.push({
+          role: "assistant",
+          content: data.reply || state.full || followUp.displayContent || "",
+          charts: [...(data.charts || [])],
+          inst1_data: data.inst1_data || {},
+          inst1_column_orders: data.inst1_column_orders || {},
+          inst1_result_labels: data.inst1_result_labels || {},
+          inst1_queries: data.inst1_queries || {},
+          report_export: data.report_export || null,
+        });
       } finally {
         clearInterval(fallbackTimer);
       }
@@ -1004,6 +1406,7 @@ window.CultureChat = {
       chatNotice.style.display = "none";
 
       appendMsg("user", text, false);
+      liveChatHistory.push({ role: "user", content: text });
       const msgParts = appendMsg("assistant", "", true);
       const state = {
         full: "",
@@ -1011,10 +1414,7 @@ window.CultureChat = {
         textEl: msgParts.textEl,
         typing: createTypingController(msgParts.textEl),
       };
-      showGeneratingStatus(
-        state,
-        "[호출 에이전트: 질문 분석 에이전트]\n질문을 접수했습니다. 분석을 시작합니다."
-      );
+      showGeneratingStatus(state, initialGeneratingStatus(text));
 
       try {
         const useStream = opts.preferStream !== false;
@@ -1046,11 +1446,66 @@ window.CultureChat = {
       } finally {
         sendBtn.disabled = false;
         messageInput.focus();
+        if (window.cultureReloadQuestions) {
+          window.cultureReloadQuestions();
+        }
       }
     }
 
     window.cultureSend = sendMessage;
     renderHistory(opts.history || []);
+
+    const questionHistoryEl = document.getElementById("questionHistory");
+
+    function renderQuestionHistory(questions) {
+      if (!questionHistoryEl) return;
+      questionHistoryEl.innerHTML = "";
+      if (!questions || !questions.length) {
+        const empty = document.createElement("p");
+        empty.className = "question-history-empty";
+        empty.textContent = "아직 질문 내역이 없습니다.";
+        questionHistoryEl.appendChild(empty);
+        return;
+      }
+      questions.forEach((q) => {
+        const text = (q && q.question) || "";
+        if (!text) return;
+        const chip = document.createElement("p");
+        chip.className = "question-chip";
+        chip.textContent = text;
+        chip.title = text;
+        chip.setAttribute("tabindex", "0");
+        chip.setAttribute("role", "button");
+        chip.addEventListener("click", () => fillMessageInput(text));
+        chip.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            fillMessageInput(text);
+          }
+        });
+        questionHistoryEl.appendChild(chip);
+      });
+    }
+
+    async function loadQuestionHistory() {
+      if (!questionHistoryEl) return;
+      try {
+        const res = await fetch("/api/questions", {
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.ok) {
+          renderQuestionHistory(data.questions || []);
+        }
+      } catch (err) {
+        console.warn("질문 내역 로드 실패:", err);
+      }
+    }
+
+    window.cultureReloadQuestions = loadQuestionHistory;
+    loadQuestionHistory();
 
     function bindSidebarFillChips(selector) {
       document.querySelectorAll(selector).forEach((chip) => {

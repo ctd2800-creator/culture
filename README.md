@@ -10,7 +10,7 @@ culture/
 ├── culture_workflow.py     # LangGraph: Fetch → Summarize → Reply
 ├── static/culture_chat.js
 ├── api/index.py            # Vercel serverless 엔트리
-├── supabase/               # DDL, 시드, IAM 예시 (회원 테이블 포함)
+├── culture_db/               # DDL, 시드, IAM 예시 (회원 테이블 포함)
 ├── requirements.txt
 ├── vercel.json
 ├── pyproject.toml
@@ -38,8 +38,8 @@ python culture_app.py
 
 ```bash
 cd culture
-python supabase/apply_members.py          # DDL + 10명 등록
-python supabase/apply_members.py --force-seed   # 기존 행도 upsert
+python culture_db/apply_members.py          # DDL + 10명 등록
+python culture_db/apply_members.py --force-seed   # 기존 행도 upsert
 ```
 
 | 컬럼 | 설명 |
@@ -57,7 +57,7 @@ python supabase/apply_members.py --force-seed   # 기존 행도 upsert
 
 ```bash
 cd culture
-python supabase/apply_tshdeoa01.py
+python culture_db/apply_tshdeoa01.py
 ```
 
 ### INST1.TSHDEOA02 테이블
@@ -66,7 +66,7 @@ python supabase/apply_tshdeoa01.py
 
 ```bash
 cd culture
-python supabase/apply_tshdeoa02.py
+python culture_db/apply_tshdeoa02.py
 ```
 
 ### INST1.TSHDE0ZCD 테이블
@@ -75,7 +75,7 @@ python supabase/apply_tshdeoa02.py
 
 ```bash
 cd culture
-python supabase/apply_tshde0zcd.py
+python culture_db/apply_tshde0zcd.py
 ```
 
 ## 환경 변수

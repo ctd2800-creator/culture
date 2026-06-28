@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env.local")
 
-from supabase.culture_db import connect_culture_db, culture_db_backend
-from supabase.members_auth import authenticate_member
-from supabase.table_config import MEMBER_TABLE_NAME
+from culture_db.culture_db import connect_culture_db, culture_db_backend
+from culture_db.members_auth import authenticate_member
+from culture_db.table_config import MEMBER_TABLE_NAME
 
 try:
     conn = connect_culture_db()

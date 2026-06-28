@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from culture_db.table_config import LEGACY_EXCLUDED_TABLES
 from schema_vector.bedrock_embed import embed_text
 from schema_vector.config import schema_vector_enabled
 from schema_vector.opensearch_store import knn_search
+
+
+def _filter_excluded_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """폐기 테이블 문서는 검색 결과·데이터 사전 안내에서 제외."""
+    return [
+        hit
+        for hit in hits
+        if (hit.get("table") or "").strip() not in LEGACY_EXCLUDED_TABLES
+    ]
 
 
 def search_schema(query: str, *, k: int = 8) -> list[dict[str, Any]]:
@@ -14,7 +24,8 @@ def search_schema(query: str, *, k: int = 8) -> list[dict[str, Any]]:
     if not schema_vector_enabled():
         return []
     vector = embed_text(query)
-    return knn_search(vector, k=k)
+    raw = knn_search(vector, k=max(k * 3, k + 6))
+    return _filter_excluded_hits(raw)[:k]
 
 
 def build_schema_pipeline_notice(query: str, hits: list[dict[str, Any]]) -> str:

@@ -14,16 +14,20 @@ import os
 import psycopg2
 
 from culture_zcd_lookup import decode_inst1_data
-from supabase.table_config import (
+from culture_db.table_config import (
     INST1_AGGREGATE_COLUMNS,
+    INST1_COLUMN_DEFINITIONS,
     INST1_GROUP_ALIASES,
     INST1_JOIN_KEYS,
+    INST1_DATA_TABLES,
     INST1_NUMERIC_COLUMNS,
     INST1_TABLE_ALIASES,
     INST1_TABLE_COLUMNS,
     INST1_TABLE_KOREAN_NAMES,
     INST1_TABLE_ORDER,
     INST1_TABLE_SQL_ALIAS,
+    inst1_join_keys_between,
+    inst1_table_has_group_company,
     TSHDEOA01_KOREAN_NAME,
     TSHDEOA01_SCHEMA,
     TSHDEOA01_TABLE,
@@ -33,6 +37,15 @@ from supabase.table_config import (
     TSHDEOA04_KOREAN_NAME,
     TSHDEOA04_SCHEMA,
     TSHDEOA04_TABLE,
+    TSHDEOA03_KOREAN_NAME,
+    TSHDEOA03_SCHEMA,
+    TSHDEOA03_TABLE,
+    TSHDEOA05_KOREAN_NAME,
+    TSHDEOA05_SCHEMA,
+    TSHDEOA05_TABLE,
+    TSHDEOA06_KOREAN_NAME,
+    TSHDEOA06_SCHEMA,
+    TSHDEOA06_TABLE,
     TSHDE0ZCD_KOREAN_NAME,
     TSHDE0ZCD_SCHEMA,
     TSHDE0ZCD_TABLE,
@@ -46,13 +59,14 @@ ANALYZE_SYSTEM_PROMPT = """당신은 Culture 앱의 질문 분석 에이전트�
 - inst1_aggregate_prompt: 집계 데이터 조회 전 집계 컬럼 선택 요청 (예: "집계 데이터를 보여드릴까요?")
 - inst1_column_desc: 테이블 컬럼 설명 요청 (예: "그룹고객기본정보 컬럼 설명")
 - inst1_data_summary: 테이블 데이터 요약 요청 (예: "그룹고객기본정보 데이터 요약")
-- inst1_extract: TSHDEOA01·TSHDEOA02·TSHDEOA04·TSHDE0ZCD 테이블에서 데이터 조회·추출 요청
-- inst1_chart: 직전 집계 조회 결과로 막대 차트 생성
+- inst1_extract: TSHDEOA01·TSHDEOA02·TSHDEOA03·TSHDEOA04·TSHDEOA05·TSHDEOA06·TSHDE0ZCD 테이블에서 데이터 조회·추출 요청
+- inst1_chart: 직전 집계 조회 결과 차트 — 유형 선택 후 시각화
+- inst1_external_insight: 직전 집계 결과를 경제·정책·시장 동향 등과 결합해 분석 (분석 에이전트, 데이터 재조회 없음)
 - general_chat: 일반 대화
 
 JSON 스키마:
 {
-  "intent": "inst1_table_prompt|inst1_aggregate_prompt|inst1_column_desc|inst1_data_summary|inst1_extract|inst1_chart|general_chat",
+  "intent": "inst1_table_prompt|inst1_aggregate_prompt|inst1_column_desc|inst1_data_summary|inst1_extract|inst1_chart|inst1_external_insight|general_chat",
   "query_type": "select|aggregate|join_aggregate",
   "tables": ["TSHDEOA01", "TSHDEOA02"],
   "month": "YYYYMM 또는 빈 문자열",
@@ -62,7 +76,7 @@ JSON 스키마:
   "reason": "판단 근거 한 줄"
 }
 
-테이블 한글명: 그룹고객기본정보=TSHDEOA01, 그룹고객거래기본=TSHDEOA02, 그룹고객소득대출정보=TSHDEOA04, 그룹고객분석인스턴스목록=TSHDE0ZCD
+테이블 한글명: 그룹고객기본정보=TSHDEOA01, 그룹고객거래기본=TSHDEOA02, 그룹고객연락처정보=TSHDEOA03, 그룹고객소득대출정보=TSHDEOA04, 그룹계열사마케팅정보=TSHDEOA05, 그룹신용등급정보=TSHDEOA06, 그룹고객분석인스턴스목록=TSHDE0ZCD
 라우팅 규칙:
 - 테이블명만 → inst1_table_prompt
 - "집계 데이터"·"집계 데이터를 보여" (집계 컬럼 미지정) → inst1_aggregate_prompt
@@ -74,7 +88,7 @@ inst1_column_desc 예: "그룹고객거래기본의 컬럼", "그룹고객기본
 inst1_data_summary 예: "그룹고객기본정보 데이터 요약"
 집계 예: "26.04월 그룹고객기본정보 KB스타클럽그룹최고등급별, 성별구분별 고객수 집계"
   → tables=["TSHDEOA01"], query_type=aggregate, group_by=["KB스타클럽그룹최고등급","성별구분"]
-TSHDEOA01(그룹고객기본정보)·TSHDEOA02(그룹고객거래기본)·TSHDEOA04(그룹고객소득대출정보) 모두 컬럼별 고객수 집계 가능.
+TSHDEOA01(그룹고객기본정보)·TSHDEOA02(그룹고객거래기본)·TSHDEOA03(그룹고객연락처정보)·TSHDEOA04(그룹고객소득대출정보)·TSHDEOA05(그룹계열사마케팅정보)·TSHDEOA06(그룹신용등급정보) 모두 컬럼별 고객수 집계 가능.
 집계 예2: "그룹고객거래기본 급여이체여부별, 당월상품신규계약수별 집계" → tables=["TSHDEOA02"]
 조인 집계 예: "그룹고객기본정보·그룹고객거래기본 참조 2026.04 KB스타클럽그룹본인등급별, 보유수신상품계약수별 고객수 집계"
   → query_type=join_aggregate, join_tables=["TSHDEOA01","TSHDEOA02"]
@@ -109,6 +123,16 @@ TABLE_HINTS: dict[str, tuple[str, ...]] = {
         "비대면거래",
         "상품계약",
     ),
+    "TSHDEOA03": (
+        "TSHDEOA03",
+        "TSHDE0A03",
+        TSHDEOA03_KOREAN_NAME,
+        "그룹 고객 연락처정보",
+        "연락처",
+        "마케팅동의",
+        "이메일",
+        "휴대폰",
+    ),
     "TSHDEOA04": (
         "TSHDEOA04",
         "TSHDE0A04",
@@ -121,6 +145,23 @@ TABLE_HINTS: dict[str, tuple[str, ...]] = {
         "대출잔액",
         "연체",
         "직업분류",
+    ),
+    "TSHDEOA05": (
+        "TSHDEOA05",
+        "TSHDE0A05",
+        TSHDEOA05_KOREAN_NAME,
+        "그룹 계열사 마케팅정보",
+        "계열사마케팅",
+        "마케팅동의",
+    ),
+    "TSHDEOA06": (
+        "TSHDEOA06",
+        "TSHDE0A06",
+        TSHDEOA06_KOREAN_NAME,
+        "그룹 신용등급정보",
+        "신용등급",
+        "세그먼트",
+        "결합평점",
     ),
     "TSHDE0ZCD": (
         "TSHDE0ZCD",
@@ -154,26 +195,40 @@ EXTRACT_HINTS = (
 )
 
 AGGREGATE_HINTS = ("집계", "고객수", "건수", "count", "별")
+# '별'·'집계' 같은 명시 키워드가 없어도 추이/변동/분포 분석이면 집계로 간주
+TREND_HINTS = ("변동", "추이", "추세", "트렌드", "분포", "현황", "변화")
+# '변동/증감' 요청이면 고객수 뒤에 전월대비 증감 컬럼을 추가
+DELTA_HINTS = ("변동", "증감", "증감현황", "변화")
+DELTA_COLUMN = "전월대비증감"
 JOIN_HINTS = ("참조", "조인", "join", "JOIN")
 
 TABLE_SQL_FQN: dict[str, str] = {
     "TSHDEOA01": f'"{TSHDEOA01_SCHEMA}"."{TSHDEOA01_TABLE}"',
     "TSHDEOA02": f'"{TSHDEOA02_SCHEMA}"."{TSHDEOA02_TABLE}"',
+    "TSHDEOA03": f'"{TSHDEOA03_SCHEMA}"."{TSHDEOA03_TABLE}"',
     "TSHDEOA04": f'"{TSHDEOA04_SCHEMA}"."{TSHDEOA04_TABLE}"',
+    "TSHDEOA05": f'"{TSHDEOA05_SCHEMA}"."{TSHDEOA05_TABLE}"',
+    "TSHDEOA06": f'"{TSHDEOA06_SCHEMA}"."{TSHDEOA06_TABLE}"',
     "TSHDE0ZCD": f'"{TSHDE0ZCD_SCHEMA}"."{TSHDE0ZCD_TABLE}"',
 }
 
 INST1_TABLE_SCHEMA: dict[str, str] = {
     TSHDEOA01_TABLE: TSHDEOA01_SCHEMA,
     TSHDEOA02_TABLE: TSHDEOA02_SCHEMA,
+    TSHDEOA03_TABLE: TSHDEOA03_SCHEMA,
     TSHDEOA04_TABLE: TSHDEOA04_SCHEMA,
+    TSHDEOA05_TABLE: TSHDEOA05_SCHEMA,
+    TSHDEOA06_TABLE: TSHDEOA06_SCHEMA,
     TSHDE0ZCD_TABLE: TSHDE0ZCD_SCHEMA,
 }
 
 _INST1_EXTRACT_SPECS: tuple[tuple[str, str, str], ...] = (
     (TSHDEOA01_TABLE, TSHDEOA01_SCHEMA, TSHDEOA01_TABLE),
     (TSHDEOA02_TABLE, TSHDEOA02_SCHEMA, TSHDEOA02_TABLE),
+    (TSHDEOA03_TABLE, TSHDEOA03_SCHEMA, TSHDEOA03_TABLE),
     (TSHDEOA04_TABLE, TSHDEOA04_SCHEMA, TSHDEOA04_TABLE),
+    (TSHDEOA05_TABLE, TSHDEOA05_SCHEMA, TSHDEOA05_TABLE),
+    (TSHDEOA06_TABLE, TSHDEOA06_SCHEMA, TSHDEOA06_TABLE),
 )
 
 COLUMN_DESC_HINTS = ("컬럼", "필드", "항목")
@@ -198,7 +253,23 @@ DATA_SHOW_HINTS = (
 )
 
 CHART_HINTS = ("차트", "그래프", "막대", "시각화", "그려", "chart")
+EXTERNAL_INSIGHT_HINTS = (
+    "외부요인",
+    "외부 요인",
+    "외부정보",
+    "외부 정보",
+    "시장 동향",
+    "시장동향",
+    "경제 동향",
+    "정책 동향",
+    "결합해 분석",
+    "결합하여 분석",
+    "결합 분석",
+    "인사이트",
+    "외부요인과 결합",
+)
 AGGREGATE_CHART_FOLLOW_UP = "조회한 집계 데이터로 차트를 그려드릴까요?"
+EXTERNAL_INSIGHT_FOLLOW_UP = "결과를 외부요인과 결합해 분석해줘"
 
 AGENT_DISPLAY_NAMES: dict[str, str] = {
     "inst1_table_prompt": "테이블 추천 질문 에이전트",
@@ -207,6 +278,7 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
     "inst1_data_summary": "데이터 요약 에이전트",
     "inst1_extract": "데이터 추출 에이전트",
     "inst1_chart": "차트 에이전트",
+    "inst1_external_insight": "분석 에이전트",
     "inst1_excel": "엑셀 저장 에이전트",
     "inst1_report": "보고서 PDF 에이전트",
     "general_chat": "일반 대화 에이전트",
@@ -235,7 +307,11 @@ WORKFLOW_NODE_STATUS: dict[str, dict[str, str]] = {
     },
     "chart": {
         "agent": AGENT_DISPLAY_NAMES["inst1_chart"],
-        "description": "집계 결과를 차트로 시각화하고 있습니다.",
+        "description": "집계 결과 차트 유형 선택을 안내하고 있습니다.",
+    },
+    "external_insight": {
+        "agent": AGENT_DISPLAY_NAMES["inst1_external_insight"],
+        "description": "직전 집계 결과를 바탕으로 경제·정책·시장 동향과 결합해 분석하고 있습니다.",
     },
     "fetch_inst1": {
         "agent": AGENT_DISPLAY_NAMES["inst1_extract"],
@@ -277,13 +353,20 @@ VIRTUAL_AGGREGATE_MEASURE = "고객수"
 AGGREGATE_FUNC_OPTIONS: tuple[str, ...] = ("합계", "최대값", "최소값", "평균")
 _AGGREGATE_FUNC_SQL: dict[str, str] = {
     "합계": "SUM",
+    "총합": "SUM",
+    "총계": "SUM",
+    "합산": "SUM",
+    "토탈": "SUM",
     "sum": "SUM",
     "최대값": "MAX",
+    "최댓값": "MAX",
     "최대": "MAX",
     "max": "MAX",
     "최소값": "MIN",
+    "최솟값": "MIN",
     "최소": "MIN",
     "min": "MIN",
+    "평균값": "AVG",
     "평균": "AVG",
     "avg": "AVG",
 }
@@ -293,6 +376,23 @@ INST1_SUMMARY_SYSTEM_PROMPT = """당신은 금융·그룹고객 INST1 데이터 
 - 조회 건수, 주요 수치·분포, 눈에 띄는 패턴을 3~6문장으로 정리하세요.
 - 통계 요약이 있으면 활용하세요.
 - 데이터에 없는 내용은 추측하지 마세요."""
+
+INST1_EXTERNAL_INSIGHT_SYSTEM_PROMPT = """당신은 금융지주 그룹고객 데이터와 거시경제를 연결하는 시니어 애널리스트입니다.
+직전 집계 데이터를 근거로, 경제·금융정책·시장 동향 등 외부 요인과 결합한 인사이트를 한국어로 작성하세요.
+
+작성 원칙:
+- 집계 데이터에서 읽히는 패턴·특이점을 먼저 짚으세요.
+- 2024~2026년대 한국 금융·거시경제 맥락(금리, 규제, 소비, 디지털 전환 등)과 연결하세요.
+- 외부 요인은 일반적으로 알려진 수준에서 서술하고, 집계 수치와의 연관을 명확히 하세요.
+- 데이터에 없는 수치를 만들지 마세요.
+- 가장 첫 줄에는 반드시 아래 형식으로 보고서 제목을 한 줄 작성하세요.
+  보고서 제목: <집계 대상·기준·기간을 반영한 간결한 분석 제목 (예: KB스타클럽 등급별 고객 추이 분석 (2026년 2~4월))>
+- 제목 다음 줄부터는 반드시 아래 세 소제목을 각각 한 줄로 그대로 사용하세요(번호 포함, 다른 머리표·마크다운 금지):
+  1. 집계 핵심 요약
+  2. 외부 환경 연결
+  3. 시사점·제언
+- '3. 시사점·제언'은 3~5개 bullet로 작성하세요.
+- 보고서 본문으로 쓸 수 있게 완결된 문장으로 작성하세요."""
 
 DEFAULT_MONTH = "202604"
 DEFAULT_GROUP = "KFG"
@@ -318,7 +418,7 @@ ALL_ROWS_HINTS: tuple[str, ...] = (
     "all rows",
 )
 
-from supabase.culture_db import connect_culture_db
+from culture_db.culture_db import connect_culture_db
 
 _db_url_cache: str | None = None
 
@@ -370,6 +470,26 @@ def format_yyyymm(yyyymm: str) -> str:
     if len(yyyymm) == 6 and yyyymm.isdigit():
         return f"{yyyymm[:4]}년 {int(yyyymm[4:6])}월"
     return yyyymm
+
+
+def parse_recent_months(text: str) -> int:
+    """'최근 N개월/N년/N분기' → 최신 데이터 N개월 수. 없으면 0.
+
+    '최근 3개월'은 DB에 적재된 가장 최신 기준년월 3개를 의미한다.
+    """
+    msg = text.strip()
+    if "최근" not in msg and "최신" not in msg:
+        return 0
+    m = re.search(r"(?:최근|최신)\s*(\d{1,2})\s*개?\s*월", msg)
+    if m:
+        return max(1, int(m.group(1)))
+    m = re.search(r"(?:최근|최신)\s*(\d{1,2})\s*분기", msg)
+    if m:
+        return max(1, int(m.group(1)) * 3)
+    m = re.search(r"(?:최근|최신)\s*(\d{1,2})\s*년", msg)
+    if m:
+        return max(1, int(m.group(1)) * 12)
+    return 0
 
 
 def _parse_customer_id(text: str) -> str | None:
@@ -554,10 +674,17 @@ def _resolve_query_tables(message: str, hinted: list[str] | None = None) -> list
         or "TSHDE0ZCD" in msg.upper()
         or TSHDE0ZCD_TABLE in tables
     )
-    a01_named = TSHDEOA01_KOREAN_NAME in msg or "TSHDEOA01" in msg.upper()
-    a02_named = TSHDEOA02_KOREAN_NAME in msg or "TSHDEOA02" in msg.upper()
-    a04_named = TSHDEOA04_KOREAN_NAME in msg or "TSHDEOA04" in msg.upper() or "TSHDE0A04" in msg.upper()
-    if zcd_named and not a01_named and not a02_named and not a04_named:
+    data_named = any(
+        name in msg
+        for table in INST1_TABLE_ORDER
+        for name in (
+            table,
+            INST1_TABLE_KOREAN_NAMES.get(table, ""),
+            f"TSHDE0A{table[-2:]}",
+        )
+        if name
+    )
+    if zcd_named and not data_named:
         return [TSHDE0ZCD_TABLE]
     return tables
 
@@ -588,9 +715,9 @@ def _clean_table_label_remainder(remainder: str, table: str) -> str:
         table.upper(),
         INST1_TABLE_KOREAN_NAMES.get(table, ""),
         *INST1_TABLE_ALIASES.get(table, ()),
+        f"TSHDE0A{table[-2:]}",
+        f"TSHDE0A{table[-2:]}".upper(),
     }
-    if table == TSHDEOA04_TABLE:
-        tokens.update({"TSHDE0A04", "TSHDE0A04".upper()})
     for token in sorted((t for t in tokens if t), key=len, reverse=True):
         cleaned = cleaned.replace(token, "")
     return re.sub(r"[()\s（）,，·]", "", cleaned).strip()
@@ -714,6 +841,17 @@ def _wants_chart(msg: str) -> bool:
     return any(h in msg for h in CHART_HINTS)
 
 
+def _wants_external_insight(msg: str) -> bool:
+    m = msg.strip()
+    if any(h in m for h in EXTERNAL_INSIGHT_HINTS):
+        return True
+    if re.search(r"결합.{0,12}분석", m):
+        return True
+    if re.search(r"외부.{0,8}(요인|정보).{0,12}분석", m):
+        return True
+    return False
+
+
 CUSTOMER_ID_COLUMN = "그룹고객식별자"
 
 
@@ -795,47 +933,232 @@ def _aggregate_chart_label(row: dict[str, Any], group_by: list[str]) -> str:
     return " / ".join(parts) if parts else "-"
 
 
-def build_aggregate_chart_specs(pending_chart: dict[str, Any]) -> list[dict[str, Any]]:
-    """집계 결과 pending_chart → Chart.js 막대그래프 스펙."""
+def _coerce_chart_number(val: Any) -> float | None:
+    """차트 값으로 쓸 수 있는 숫자면 float, 아니면 None."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, Decimal):
+        return float(val)
+    if isinstance(val, str):
+        text = val.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _chartable_measure_columns(
+    rows: list[dict[str, Any]],
+    group_by: list[str],
+) -> list[str]:
+    """집계 결과에서 차트로 그릴 수 있는 숫자 측정 컬럼 목록.
+
+    GROUP BY 축과 전월대비증감 컬럼을 제외한, 값이 숫자인 컬럼을 반환한다.
+    고객수 집계뿐 아니라 수신잔액 합계 등 임의 숫자 집계도 차트 대상이 된다.
+    """
+    if not rows:
+        return []
+    group_set = set(group_by)
+    measures: list[str] = []
+    for key in rows[0].keys():
+        if key in group_set or key == DELTA_COLUMN:
+            continue
+        if any(_coerce_chart_number(row.get(key)) is not None for row in rows):
+            measures.append(key)
+    return measures
+
+
+CHART_TYPE_OPTIONS: tuple[dict[str, str], ...] = (
+    {"id": "bar", "label": "막대차트"},
+    {"id": "line", "label": "선차트"},
+    {"id": "pie", "label": "원형차트"},
+    {"id": "doughnut", "label": "도넛차트"},
+)
+
+_CHART_SLICE_COLORS = (
+    "rgba(255, 204, 0, 0.88)",
+    "rgba(92, 75, 60, 0.88)",
+    "rgba(255, 159, 64, 0.88)",
+    "rgba(75, 192, 192, 0.88)",
+    "rgba(153, 102, 255, 0.88)",
+    "rgba(255, 99, 132, 0.88)",
+    "rgba(54, 162, 235, 0.88)",
+    "rgba(201, 203, 207, 0.88)",
+)
+
+
+def build_chart_type_options() -> list[dict[str, str]]:
+    return [dict(opt) for opt in CHART_TYPE_OPTIONS]
+
+
+def _chart_slice_colors(count: int) -> list[str]:
+    if count <= 0:
+        return []
+    colors = list(_CHART_SLICE_COLORS)
+    out: list[str] = []
+    for i in range(count):
+        out.append(colors[i % len(colors)])
+    return out
+
+
+_SERIES_RGB = (
+    (255, 204, 0),
+    (92, 75, 60),
+    (255, 159, 64),
+    (75, 192, 192),
+    (153, 102, 255),
+    (255, 99, 132),
+    (54, 162, 235),
+    (201, 203, 207),
+)
+
+
+def _series_color(idx: int, *, alpha: float = 1.0) -> str:
+    r, g, b = _SERIES_RGB[idx % len(_SERIES_RGB)]
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def _series_fill(idx: int) -> str:
+    return _series_color(idx, alpha=0.25)
+
+
+def _chart_type_label(chart_type: str) -> str:
+    for opt in CHART_TYPE_OPTIONS:
+        if opt["id"] == chart_type:
+            return opt["label"]
+    return chart_type
+
+
+def _series_values(rows: list[dict[str, Any]], col: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        num = _coerce_chart_number(row.get(col))
+        values.append(num if num is not None else 0.0)
+    return values
+
+
+def build_aggregate_chart_specs(
+    pending_chart: dict[str, Any],
+    *,
+    chart_type: str = "bar",
+) -> list[dict[str, Any]]:
+    """집계 결과 pending_chart → Chart.js 스펙.
+
+    고객수뿐 아니라 수신잔액 합계 등 임의 숫자 집계 컬럼을 차트로 그린다.
+    측정 컬럼이 여러 개면 막대·선차트는 컬럼별 데이터셋으로, 원형·도넛은
+    집계 항목마다 별도의 차트를 생성해 모든 항목을 시각화한다.
+    """
     rows = list(pending_chart.get("rows") or [])
     group_by = _normalize_group_by(pending_chart.get("group_by"))
     if not rows or not group_by:
         return []
-    if "고객수" not in rows[0]:
+    measures = list(pending_chart.get("measures") or []) or _chartable_measure_columns(
+        rows, group_by
+    )
+    if not measures:
         return []
+
+    chart_type = (chart_type or "bar").strip().lower()
+    valid_ids = {opt["id"] for opt in CHART_TYPE_OPTIONS}
+    if chart_type not in valid_ids:
+        chart_type = "bar"
 
     display = pending_chart.get("display_label") or "집계"
     month = (pending_chart.get("month") or "").strip()
     month_suffix = f" · {format_yyyymm(month)}" if month else ""
     group_cols_label = ", ".join(group_by)
+    type_label = _chart_type_label(chart_type)
 
     sorted_rows = sorted(
         rows,
         key=lambda r: _aggregate_chart_label(r, group_by),
     )
     labels = [_aggregate_chart_label(r, group_by) for r in sorted_rows]
-    counts = []
-    for row in sorted_rows:
-        val = row.get("고객수")
-        try:
-            counts.append(float(val) if val is not None else 0.0)
-        except (TypeError, ValueError):
-            counts.append(0.0)
+    measures_label = ", ".join(measures)
 
+    title = (
+        f"{display} · {group_cols_label}별 {measures_label} "
+        f"({type_label}){month_suffix}"
+    )
+
+    if chart_type in ("pie", "doughnut"):
+        # 원형·도넛은 한 차트에 하나의 시리즈만 표현 가능하므로
+        # 집계 항목마다 별도의 차트를 생성한다.
+        specs: list[dict[str, Any]] = []
+        for col in measures:
+            values = _series_values(sorted_rows, col)
+            pie_title = (
+                f"{display} · {group_cols_label}별 {col} "
+                f"({type_label}){month_suffix}"
+            )
+            specs.append(
+                {
+                    "type": chart_type,
+                    "title": pie_title,
+                    "labels": labels,
+                    "datasets": [
+                        {
+                            "label": col,
+                            "data": values,
+                            "backgroundColor": _chart_slice_colors(len(values)),
+                            "borderColor": "#fff",
+                            "borderWidth": 1,
+                        }
+                    ],
+                }
+            )
+        return specs
+
+    if chart_type == "line":
+        datasets = []
+        for idx, col in enumerate(measures):
+            color = _series_color(idx)
+            datasets.append(
+                {
+                    "label": col,
+                    "data": _series_values(sorted_rows, col),
+                    "borderColor": color,
+                    "backgroundColor": _series_fill(idx),
+                    "borderWidth": 2,
+                    "pointBackgroundColor": color,
+                    "pointBorderColor": "rgba(92, 75, 60, 1)",
+                    "tension": 0.2,
+                    "fill": False,
+                }
+            )
+        return [
+            {
+                "type": "line",
+                "title": title,
+                "labels": labels,
+                "datasets": datasets,
+            }
+        ]
+
+    datasets = []
+    for idx, col in enumerate(measures):
+        datasets.append(
+            {
+                "label": col,
+                "data": _series_values(sorted_rows, col),
+                "backgroundColor": _series_color(idx, alpha=0.82),
+                "borderColor": "rgba(92, 75, 60, 1)",
+                "borderWidth": 1,
+            }
+        )
     return [
         {
             "type": "bar",
-            "title": f"{display} · {group_cols_label}별 고객수{month_suffix}",
+            "title": title,
             "labels": labels,
-            "datasets": [
-                {
-                    "label": "고객수",
-                    "data": counts,
-                    "backgroundColor": "rgba(255, 204, 0, 0.82)",
-                    "borderColor": "rgba(92, 75, 60, 1)",
-                    "borderWidth": 1,
-                }
-            ],
+            "datasets": datasets,
         }
     ]
 
@@ -844,7 +1167,7 @@ def build_pending_chart_payload(
     analysis: dict[str, Any],
     extract_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """집계 조회 성공 시 차트 follow-up용 세션 데이터."""
+    """집계 조회 성공 시 차트·외부요인 follow-up용 세션 데이터."""
     query_type = analysis.get("query_type") or ""
     if query_type not in ("aggregate", "join_aggregate"):
         return {}
@@ -853,38 +1176,180 @@ def build_pending_chart_payload(
         return {}
     data: dict[str, list] = extract_result.get("inst1_data") or {}
     labels: dict[str, str] = extract_result.get("inst1_result_labels") or {}
+    column_orders: dict[str, list] = extract_result.get("inst1_column_orders") or {}
+    queries: dict[str, str] = extract_result.get("inst1_queries") or {}
     for key, rows in data.items():
-        if not rows or "고객수" not in rows[0]:
+        if not rows:
             continue
-        return {
+        safe_rows = [_json_safe_row(r) for r in rows]
+        measures = _chartable_measure_columns(safe_rows, group_by)
+        payload = {
             "result_key": key,
-            "rows": [_json_safe_row(r) for r in rows],
+            "rows": safe_rows,
             "group_by": group_by,
             "display_label": labels.get(key, inst1_result_label(key)),
+            "column_order": list(column_orders.get(key) or []),
+            "query": queries.get(key, ""),
             "month": (extract_result.get("month") or "").strip(),
             "group_company": (extract_result.get("group_company") or "").strip(),
+            "measures": measures,
+            "chartable": bool(measures),
         }
+        return payload
     return {}
 
 
 def format_chart_agent_reply(
     analysis: dict[str, Any],
     pending_chart: dict[str, Any],
-    chart_specs: list[dict[str, Any]],
+    *,
+    chart_type: str | None = None,
 ) -> str:
     display = pending_chart.get("display_label") or "집계 데이터"
     group_by = ", ".join(_normalize_group_by(pending_chart.get("group_by")))
     row_count = len(pending_chart.get("rows") or [])
-    title = (chart_specs[0].get("title") if chart_specs else "") or display
+    measures = list(pending_chart.get("measures") or []) or _chartable_measure_columns(
+        list(pending_chart.get("rows") or []),
+        _normalize_group_by(pending_chart.get("group_by")),
+    )
+    measures_label = ", ".join(measures) if measures else "집계값"
+    if chart_type:
+        type_label = _chart_type_label(chart_type)
+        tail = f"아래 {type_label}에서 {measures_label}을(를) 확인하세요."
+    else:
+        type_labels = ", ".join(opt["label"] for opt in CHART_TYPE_OPTIONS)
+        tail = "\n".join(
+            [
+                "아래에서 차트 유형을 선택해 주세요.",
+                f"선택 가능: {type_labels}",
+            ]
+        )
     body = "\n".join(
         [
             "[집계 데이터 차트]",
             f"- 대상: {display}",
             f"- 집계 기준: {group_by}",
+            f"- 집계 항목: {measures_label}",
             f"- 표시 건수: {row_count}건",
-            f"- 차트: {title}",
             "",
-            "아래 막대그래프에서 고객수를 확인하세요.",
+            tail,
+        ]
+    )
+    return with_agent_banner(body, analysis)
+
+
+def _detect_external_insight_followup(
+    message: str,
+    pending_chart: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not _wants_external_insight(message.strip()):
+        return None
+    pending = pending_chart or {}
+    if not pending.get("rows"):
+        return None
+    return {
+        "intent": "inst1_external_insight",
+        "query_type": "analysis",
+        "tables": [],
+        "month": pending.get("month") or "",
+        "group_company": pending.get("group_company") or "",
+        "customer_id": None,
+        "group_by": list(pending.get("group_by") or []),
+        "reason": "직전 집계 결과 분석 요청",
+    }
+
+
+def _build_analysis_agent_payload(
+    pending_chart: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """분석 에이전트 라우팅 — 데이터 추출(fetch) 없이 직전 집계 스냅샷 사용."""
+    pending = pending_chart or {}
+    return {
+        "intent": "inst1_external_insight",
+        "query_type": "analysis",
+        "tables": [],
+        "month": pending.get("month") or "",
+        "group_company": pending.get("group_company") or "",
+        "customer_id": None,
+        "group_by": list(pending.get("group_by") or []),
+        "reason": reason,
+    }
+
+
+def _resolve_analysis_agent_intent(
+    message: str,
+    pending_chart: dict[str, Any] | None,
+    *,
+    reason: str = "직전 집계 결과 분석 요청",
+) -> dict[str, Any]:
+    followup = _detect_external_insight_followup(message, pending_chart)
+    if followup:
+        return followup
+    return _build_analysis_agent_payload(
+        pending_chart,
+        reason=reason,
+    )
+
+
+def analyze_aggregate_external_insight(
+    pending_chart: dict[str, Any],
+    user_message: str,
+    analysis: dict[str, Any],
+    *,
+    bedrock_ask=None,
+) -> str:
+    """직전 집계 결과 기반 분석."""
+    rows = list(pending_chart.get("rows") or [])
+    if not rows:
+        raise ValueError(
+            "분석할 집계 데이터가 없습니다. 먼저 집계 데이터를 조회해 주세요."
+        )
+    group_by = _normalize_group_by(pending_chart.get("group_by"))
+    display = pending_chart.get("display_label") or "집계 데이터"
+    month = (pending_chart.get("month") or "").strip()
+    group = (pending_chart.get("group_company") or "").strip()
+
+    sample_rows = [_json_safe_row(r) for r in rows[:50]]
+    data_json = json.dumps(sample_rows, ensure_ascii=False, indent=2, default=str)
+
+    header_lines = [
+        "[분석]",
+        f"- 대상: {display}",
+        f"- 집계 기준: {', '.join(group_by) if group_by else '-'}",
+        f"- 데이터 건수: {len(rows)}건",
+    ]
+    if month:
+        header_lines.append(f"- 기준년월: {month} ({format_yyyymm(month)})")
+    if group:
+        header_lines.append(f"- 그룹회사코드: {group}")
+
+    request_text = user_message.strip() or EXTERNAL_INSIGHT_FOLLOW_UP
+    prompt = (
+        f"집계 대상: {display}\n"
+        f"기준년월: {month or '-'} ({format_yyyymm(month) if month else '-'})\n"
+        f"그룹회사코드: {group or '-'}\n"
+        f"집계 기준: {', '.join(group_by) if group_by else '-'}\n"
+        f"전체 {len(rows)}건 (JSON 최대 {len(sample_rows)}건):\n{data_json}\n\n"
+        f"사용자 요청: {request_text}\n\n"
+        "위 집계 결과를 경제·금융정책·시장 동향과 결합해 인사이트를 작성하세요."
+    )
+
+    if bedrock_ask is None:
+        body = "\n".join([*header_lines, "", "(Bedrock 미연결 — 분석 본문 생략)"])
+        return with_agent_banner(body, analysis)
+
+    insight = bedrock_ask(
+        INST1_EXTERNAL_INSIGHT_SYSTEM_PROMPT,
+        [{"role": "user", "content": prompt}],
+        4096,
+    )
+    body = "\n".join(
+        [
+            *header_lines,
+            "",
+            insight.strip(),
         ]
     )
     return with_agent_banner(body, analysis)
@@ -898,8 +1363,8 @@ def build_report_export(
     month: str = "",
     chart_specs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """차트·요약 에이전트 응답 → PDF 보고서 저장용 payload."""
-    from culture_pdf_s3 import ascii_report_filename
+    """분석 에이전트 응답 → Word 보고서 버튼 노출용 payload."""
+    from culture_ppt_report import ascii_report_filename
 
     text = (content or "").strip()
     if not text:
@@ -910,7 +1375,7 @@ def build_report_export(
         "table_label": table_label,
         "month": (month or "").strip(),
         "chart_specs": list(chart_specs or []),
-        "filename": ascii_report_filename("culture_report"),
+        "filename": ascii_report_filename("culture_report", ext="docx"),
     }
 
 
@@ -989,6 +1454,8 @@ def _detect_chart_followup(
 
 
 def _wants_data_extract(msg: str) -> bool:
+    if _wants_external_insight(msg):
+        return False
     if _wants_chart(msg):
         return False
     if _wants_aggregate_data_prompt(msg):
@@ -1017,6 +1484,14 @@ def build_table_prompt_follow_up_questions(korean: str) -> list[str]:
         f"{korean}의 컬럼을 설명해 드릴까요?",
         f"{korean}의 데이터를 요약해 드릴까요?",
     ]
+
+
+def build_aggregate_follow_up_questions(*, chart_available: bool = False) -> list[str]:
+    """집계 조회 성공 후 추천 질문."""
+    questions = [EXTERNAL_INSIGHT_FOLLOW_UP]
+    if chart_available:
+        questions.insert(0, AGGREGATE_CHART_FOLLOW_UP)
+    return questions
 
 
 def format_inst1_table_prompt_reply(analysis: dict[str, Any]) -> str:
@@ -1323,12 +1798,7 @@ def _match_measure_column(token: str, measures: list[str]) -> str | None:
     name = (token or "").strip()
     if not name:
         return None
-    if name in measures:
-        return name
-    for col in sorted(measures, key=len, reverse=True):
-        if name in col or col in name:
-            return col
-    return None
+    return name if name in measures else None
 
 
 def _parse_measure_func_assignments(
@@ -1486,6 +1956,42 @@ def _detect_aggregate_prompt_intent(message: str) -> dict[str, Any] | None:
         table,
         korean,
         reason="집계 데이터 조회 — 컬럼 선택 대기",
+    )
+
+
+def _reprompt_current_aggregate_stage(
+    pending: dict[str, Any],
+) -> dict[str, Any] | None:
+    """집계 컬럼 선택 진행 중 입력을 인식 못했을 때, 같은 단계를 다시 안내(재시작 방지)."""
+    table = (pending.get("table") or "").strip()
+    if not table:
+        return None
+    stage = (pending.get("stage") or "group_by").strip()
+    korean = pending.get("korean") or INST1_TABLE_KOREAN_NAMES.get(table, table)
+    if stage == "measure":
+        group_by = _normalize_group_by(pending.get("group_by"))
+        if not group_by:
+            return None
+        return _build_aggregate_measure_prompt_payload(
+            table, korean, group_by,
+            reason="집계 항목 선택 대기 — 입력을 인식하지 못해 다시 안내",
+        )
+    if stage == "aggregate_func":
+        group_by = _normalize_group_by(pending.get("group_by"))
+        measures = _normalize_measure_selection(
+            list(pending.get("aggregate_measures") or [])
+        )
+        if not group_by or not measures:
+            return None
+        return _build_aggregate_func_prompt_payload(
+            table, korean, group_by, measures,
+            aggregate_measure_funcs=dict(pending.get("aggregate_measure_funcs") or {}),
+            reason="집계 함수 선택 대기 — 입력을 인식하지 못해 다시 안내",
+        )
+    return _build_aggregate_prompt_payload(
+        table, korean,
+        reason="집계 조회 항목 선택 대기 — 입력을 인식하지 못해 다시 안내",
+        aggregate_stage="group_by",
     )
 
 
@@ -1669,13 +2175,14 @@ def fetch_inst1_column_descriptions(table: str) -> list[tuple[str, str]]:
         with conn.cursor() as cur:
             cur.execute(sql, (schema, table))
             rows = cur.fetchall()
+    defs = INST1_COLUMN_DEFINITIONS.get(table, {})
     if rows:
         return [
-            (name, _parse_column_comment(desc, name))
+            (name, defs.get(name) or _parse_column_comment(desc, name))
             for name, desc in rows
         ]
     fallback = INST1_TABLE_COLUMNS.get(table, ())
-    return [(col, col) for col in fallback]
+    return [(col, defs.get(col, col)) for col in fallback]
 
 
 def explain_inst1_columns(analysis: dict[str, Any]) -> str:
@@ -1799,8 +2306,6 @@ def summarize_inst1_table_data(
             *header,
             "",
             summary.strip(),
-            "",
-            "보고서 버튼으로 PDF 보고서를 생성·저장할 수 있습니다.",
         ]
     )
     return with_agent_banner(body, analysis)
@@ -1826,6 +2331,9 @@ def _build_analysis_payload(
     reason: str,
 ) -> dict[str, Any]:
     msg = message.strip()
+    recent_months = parse_recent_months(msg)
+    trend_request = recent_months > 0 or any(h in msg for h in TREND_HINTS)
+    delta_request = any(h in msg for h in DELTA_HINTS)
     group_by_details = _parse_group_by_details(msg)
     group_by = [d["column"] for d in group_by_details]
     join_tables = _infer_join_tables(tables, msg, group_by_details)
@@ -1841,6 +2349,12 @@ def _build_analysis_payload(
     elif _is_aggregate_request(msg):
         aggregate_table, group_by = _detect_aggregate_table(tables, msg)
         query_type = "aggregate" if group_by else "select"
+    elif trend_request:
+        # '별'·'집계' 키워드는 없지만 변동/추이/현황 등 추이 분석 요청.
+        # 메시지에 직접 언급된 집계 가능 컬럼(별칭 포함)을 찾아 집계로 처리.
+        aggregate_table, group_by = _detect_aggregate_table(tables, msg)
+        if group_by:
+            query_type = "aggregate"
     korean_tables = _mentioned_korean_tables(msg)
     if korean_tables:
         labels = dict(INST1_TABLE_KOREAN_NAMES)
@@ -1848,11 +2362,40 @@ def _build_analysis_payload(
             f"{labels.get(table, table)}→{table}" for table in korean_tables
         )
         reason = f"{reason} ({alias_note})"
+
+    if recent_months:
+        # '최근 N개월' → 최신 N개월 추이/변동 분석이므로 기준년월을 집계 축에 추가
+        if query_type == "aggregate" and group_by and "기준년월" not in group_by:
+            group_by = ["기준년월", *group_by]
+        elif query_type == "join_aggregate" and group_by_details:
+            primary = next(
+                (t for t in INST1_TABLE_ORDER if t in join_tables),
+                join_tables[0] if join_tables else None,
+            )
+            if primary and not any(
+                d["column"] == "기준년월" for d in group_by_details
+            ):
+                group_by_details = [
+                    {"table": primary, "column": "기준년월"},
+                    *group_by_details,
+                ]
+
+    has_month_axis = "기준년월" in group_by or any(
+        d["column"] == "기준년월" for d in group_by_details
+    )
+    delta = bool(
+        delta_request
+        and has_month_axis
+        and query_type in ("aggregate", "join_aggregate")
+    )
+
     return {
         "intent": "inst1_extract",
         "query_type": query_type,
         "tables": tables,
         "month": parse_month(msg) or "",
+        "recent_months": recent_months,
+        "delta": delta,
         "group_company": _parse_group_company(msg),
         "customer_id": _parse_customer_id(msg),
         "group_by": group_by,
@@ -1873,6 +2416,8 @@ def _rule_based_analysis(
     pending_chart: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     msg = message.strip()
+    if _wants_external_insight(msg):
+        return _resolve_analysis_agent_intent(msg, pending_chart)
     chart_followup = _detect_chart_followup(msg, pending_chart)
     if chart_followup:
         return chart_followup
@@ -1902,6 +2447,7 @@ def _rule_based_analysis(
             or _wants_data_summary(msg)
             or _wants_aggregate_data_prompt(msg)
             or _wants_chart(msg)
+            or _wants_external_insight(msg)
             or _is_aggregate_request(msg)
         ):
             return _build_analysis_payload(
@@ -1913,38 +2459,52 @@ def _rule_based_analysis(
     if not tables and wants_extract:
         if TSHDE0ZCD_KOREAN_NAME in msg or "TSHDE0ZCD" in msg.upper():
             tables = [TSHDE0ZCD_TABLE]
-        elif any(
-            k in msg
-            for k in (
-                TSHDEOA04_KOREAN_NAME,
-                "TSHDEOA04",
-                "TSHDE0A04",
-                "소득대출",
-                "연소득",
-                "대출잔액",
-                "연체잔액",
-            )
-        ):
-            tables = [TSHDEOA04_TABLE]
-        elif any(
-            k in msg
-            for k in (
-                "거래",
-                "잔액",
-                "INST1",
-                "inst1",
-                TSHDEOA01_KOREAN_NAME,
-                TSHDEOA02_KOREAN_NAME,
-            )
-        ):
-            tables = ["TSHDEOA01", "TSHDEOA02"]
+        else:
+            hinted = _tables_from_hints(msg)
+            if len(hinted) == 1:
+                tables = hinted
+            elif any(
+                k in msg
+                for k in (
+                    "거래",
+                    "잔액",
+                    "INST1",
+                    "inst1",
+                    TSHDEOA01_KOREAN_NAME,
+                    TSHDEOA02_KOREAN_NAME,
+                )
+            ) and not hinted:
+                tables = ["TSHDEOA01", "TSHDEOA02"]
     if not tables or not wants_extract:
+        # 집계 컬럼 선택 진행 중이면 다른 의도로 새지 않도록 같은 단계를 다시 안내
+        # (데이터 추출 대신 집계 프롬프트가 재시작되는 문제 방지).
+        if pending_aggregate:
+            reprompt = _reprompt_current_aggregate_stage(pending_aggregate)
+            if reprompt:
+                return reprompt
         return None
     return _build_analysis_payload(
         msg,
         tables=tables if tables else ["TSHDEOA01", "TSHDEOA02"],
         reason="키워드 기반 INST1 데이터 추출 요청",
     )
+
+
+def predict_rule_based_intent(
+    message: str,
+    *,
+    pending_aggregate: dict[str, Any] | None = None,
+    pending_chart: dict[str, Any] | None = None,
+) -> str:
+    """Bedrock 호출 없이 규칙 기반으로 의도만 예측 (스키마 검색 스킵 판단용)."""
+    ruled = _rule_based_analysis(
+        message,
+        pending_aggregate=pending_aggregate,
+        pending_chart=pending_chart,
+    )
+    if isinstance(ruled, dict):
+        return (ruled.get("intent") or "").strip()
+    return ""
 
 
 def analyze_question(
@@ -1985,6 +2545,13 @@ def analyze_question(
         end = raw.rfind("}")
         if start >= 0 and end > start:
             parsed = json.loads(raw[start : end + 1])
+            if _wants_external_insight(message):
+                analysis = _resolve_analysis_agent_intent(
+                    message,
+                    pending_chart,
+                    reason=parsed.get("reason") or "직전 집계 결과 분석 요청",
+                )
+                return analysis
             if parsed.get("intent") == "inst1_extract":
                 hinted = _tables_from_hints(message)
                 tables = parsed.get("tables") or hinted or list(INST1_TABLE_ORDER[:2])
@@ -2049,12 +2616,20 @@ def analyze_question(
                         "reason", ""
                     )
                     return ruled_chart
+            if parsed.get("intent") == "inst1_external_insight":
+                ruled_external = _resolve_analysis_agent_intent(
+                    message,
+                    pending_chart,
+                    reason=parsed.get("reason") or "직전 집계 결과 분석 요청",
+                )
+                return ruled_external
             if parsed.get("intent") not in (
                 "inst1_table_prompt",
                 "inst1_aggregate_prompt",
                 "inst1_column_desc",
                 "inst1_data_summary",
                 "inst1_chart",
+                "inst1_external_insight",
                 "general_chat",
             ):
                 return {
@@ -2109,6 +2684,45 @@ def _column_match_candidates() -> list[tuple[str, str]]:
     return sorted(candidates, key=lambda item: len(item[0]), reverse=True)
 
 
+def _find_non_overlapping_column_mentions(
+    msg: str,
+    *,
+    skip_cols: set[str] | None = None,
+    used_spans: list[tuple[int, int]] | None = None,
+) -> list[str]:
+    """메시지에서 겹치지 않게 컬럼명을 찾는다 (긴 이름 우선).
+
+    '최근5년최고여신잔액'만 있을 때 '여신잔액'이 중복 매칭되지 않고,
+    '최근5년최고여신잔액, 여신잔액'처럼 의도적으로 둘 다 적었을 때는 각각 인식한다.
+    """
+    skip_cols = skip_cols or set()
+    spans = list(used_spans or [])
+    found: list[tuple[int, str]] = []
+    seen: set[str] = set(skip_cols)
+
+    for hint, col in _column_match_candidates():
+        if col in seen:
+            continue
+        pos = 0
+        while pos <= len(msg) - len(hint):
+            idx = msg.find(hint, pos)
+            if idx < 0:
+                break
+            end = idx + len(hint)
+            if _match_inside_table_name(msg, idx, hint):
+                pos = idx + 1
+                continue
+            if any(not (end <= u0 or idx >= u1) for u0, u1 in spans):
+                pos = idx + 1
+                continue
+            spans.append((idx, end))
+            found.append((idx, col))
+            seen.add(col)
+            break
+
+    return [col for _, col in sorted(found, key=lambda item: item[0])]
+
+
 def parse_mentioned_columns(message: str) -> list[str]:
     """질문에 등장한 컬럼명·별칭·'XXX별' 패턴을 등장 순서대로 반환."""
     msg = message.strip()
@@ -2126,15 +2740,15 @@ def parse_mentioned_columns(message: str) -> list[str]:
                 seen.add(col)
                 break
 
-    positions: dict[str, int] = {}
-    for hint, col in _column_match_candidates():
-        if col in seen:
-            continue
-        pos = msg.find(hint)
-        if pos >= 0 and col not in positions and not _match_inside_table_name(msg, pos, hint):
-            positions[col] = pos
+    used_spans: list[tuple[int, int]] = []
+    for col in ordered:
+        pos = msg.find(col)
+        if pos >= 0:
+            used_spans.append((pos, pos + len(col)))
 
-    for col, _ in sorted(positions.items(), key=lambda item: item[1]):
+    for col in _find_non_overlapping_column_mentions(
+        msg, skip_cols=seen, used_spans=used_spans
+    ):
         ordered.append(col)
         seen.add(col)
 
@@ -2231,10 +2845,15 @@ def apply_column_order_to_results(
     return ordered, column_orders
 
 
+_TRAILING_MEASURE_ORDER = (VIRTUAL_AGGREGATE_MEASURE, DELTA_COLUMN)
+
+
 def _order_result_columns(cols: list[str]) -> list[str]:
-    if "고객수" not in cols:
+    trailing = [c for c in _TRAILING_MEASURE_ORDER if c in cols]
+    if not trailing:
         return cols
-    return [c for c in cols if c != "고객수"] + ["고객수"]
+    head = [c for c in cols if c not in trailing]
+    return head + trailing
 
 
 def _row_to_dict(cols: list[str], row: tuple) -> dict[str, Any]:
@@ -2276,31 +2895,84 @@ def _filter_condition_text(
     return ", ".join(parts)
 
 
+def _recent_months_filter(
+    *,
+    logical_table: str,
+    group_company: str,
+    has_grp: bool,
+    recent_months: int,
+    for_display: bool,
+    column_ref: str = '"기준년월"',
+) -> tuple[str, list[Any]]:
+    """최신 N개월(기준년월) IN-서브쿼리 조건 생성."""
+    n = int(recent_months)
+    fqn = TABLE_SQL_FQN[logical_table]
+    params: list[Any] = []
+    if has_grp:
+        if for_display:
+            grp = f"WHERE trim(\"그룹회사코드\") = '{group_company}' "
+        else:
+            grp = 'WHERE trim("그룹회사코드") = %s '
+            params.append(group_company)
+    else:
+        grp = ""
+    sub = (
+        f'{column_ref} IN (SELECT DISTINCT "기준년월" FROM {fqn} '
+        f'{grp}ORDER BY "기준년월" DESC LIMIT {n})'
+    )
+    return sub, params
+
+
 def _base_where_parts(
     *,
+    table: str,
     month: str,
     group_company: str,
     customer_id: str | None,
     for_display: bool,
     group_by: list[str] | None = None,
+    recent_months: int = 0,
 ) -> tuple[list[str], list[Any]]:
     filter_month = _should_filter_month_in_where(month, group_by)
+    has_grp = inst1_table_has_group_company(table)
+    recent_n = int(recent_months or 0)
     if for_display:
         where_parts: list[str] = []
-        if filter_month:
+        if recent_n > 0:
+            sub, _ = _recent_months_filter(
+                logical_table=table,
+                group_company=group_company,
+                has_grp=has_grp,
+                recent_months=recent_n,
+                for_display=True,
+            )
+            where_parts.append(sub)
+        elif filter_month:
             where_parts.append(f'"기준년월" = \'{month}\'')
-        where_parts.append(f'trim("그룹회사코드") = \'{group_company}\'')
+        if has_grp:
+            where_parts.append(f'trim("그룹회사코드") = \'{group_company}\'')
         if customer_id:
             where_parts.append(f'trim("그룹고객식별자") = \'{customer_id}\'')
         return where_parts, []
 
     where_parts: list[str] = []
     params: list[Any] = []
-    if filter_month:
+    if recent_n > 0:
+        sub, sub_params = _recent_months_filter(
+            logical_table=table,
+            group_company=group_company,
+            has_grp=has_grp,
+            recent_months=recent_n,
+            for_display=False,
+        )
+        where_parts.append(sub)
+        params.extend(sub_params)
+    elif filter_month:
         where_parts.append('"기준년월" = %s')
         params.append(month)
-    where_parts.append('trim("그룹회사코드") = %s')
-    params.append(group_company)
+    if has_grp:
+        where_parts.append('trim("그룹회사코드") = %s')
+        params.append(group_company)
     if customer_id:
         where_parts.append('trim("그룹고객식별자") = %s')
         params.append(customer_id)
@@ -2356,6 +3028,7 @@ def build_aggregate_query(
     aggregate_func: str = "SUM",
     aggregate_measure_funcs: dict[str, str] | None = None,
     explicit_measures: bool = False,
+    recent_months: int = 0,
 ) -> str:
     """집계용 GROUP BY + 집계 함수 SELECT 쿼리 문자열 생성 (표시용)."""
     cols = _normalize_group_by(group_by)
@@ -2370,11 +3043,13 @@ def build_aggregate_query(
         func_sql = _normalize_aggregate_func(aggregate_func)
         measure_funcs = {col: func_sql for col in measures}
     where_parts, _ = _base_where_parts(
+        table=logical_table,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=True,
         group_by=cols,
+        recent_months=recent_months,
     )
     select_cols = ",\n       ".join(
         f'{_sql_group_col(logical_table, col)} AS "{col}"' for col in cols
@@ -2403,18 +3078,24 @@ def build_select_query(
     group_company: str,
     customer_id: str | None,
     limit: int | None,
+    logical_table: str | None = None,
+    recent_months: int = 0,
 ) -> str:
     """추출 조건에 맞는 SELECT 쿼리 문자열 생성 (표시용)."""
+    logical = logical_table or table
     where_parts, _ = _base_where_parts(
+        table=logical,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=True,
+        recent_months=recent_months,
     )
+    where_clause = f'WHERE {" AND ".join(where_parts)}\n' if where_parts else ""
     return (
         f'SELECT *\n'
         f'FROM "{schema}"."{table}"\n'
-        f'WHERE {" AND ".join(where_parts)}\n'
+        f'{where_clause}'
         f'ORDER BY "그룹고객식별자"'
         f'{_sql_limit_suffix(limit)};'
     )
@@ -2428,7 +3109,10 @@ def _fetch_table(
     group_company: str,
     customer_id: str | None,
     limit: int | None,
+    logical_table: str | None = None,
+    recent_months: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
+    logical = logical_table or table
     display_sql = build_select_query(
         schema,
         table,
@@ -2436,16 +3120,21 @@ def _fetch_table(
         group_company=group_company,
         customer_id=customer_id,
         limit=limit,
+        logical_table=logical,
+        recent_months=recent_months,
     )
     where, params = _base_where_parts(
+        table=logical,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=False,
+        recent_months=recent_months,
     )
+    where_sql = f"WHERE {' AND '.join(where)} " if where else ""
     exec_sql = (
         f'SELECT * FROM "{schema}"."{table}" '
-        f"WHERE {' AND '.join(where)} "
+        f"{where_sql}"
         f'ORDER BY "그룹고객식별자"'
     )
     if limit is not None:
@@ -2551,6 +3240,7 @@ def _fetch_aggregate(
     aggregate_func: str = "SUM",
     aggregate_measure_funcs: dict[str, str] | None = None,
     explicit_measures: bool = False,
+    recent_months: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
     cols = _normalize_group_by(group_by)
     measures = _resolve_aggregate_measures(
@@ -2572,13 +3262,16 @@ def _fetch_aggregate(
         aggregate_measures=measures,
         aggregate_measure_funcs=measure_funcs,
         explicit_measures=explicit_measures,
+        recent_months=recent_months,
     )
     where, params = _base_where_parts(
+        table=logical_table,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=False,
         group_by=cols,
+        recent_months=recent_months,
     )
     select_cols = ", ".join(
         f'{_sql_group_col(logical_table, col)} AS "{col}"' for col in cols
@@ -2602,31 +3295,46 @@ def _fetch_aggregate(
     return rows, display_sql
 
 
-def _join_on_sql(base_alias: str, join_alias: str) -> str:
+def _join_on_sql(table_a: str, alias_a: str, table_b: str, alias_b: str) -> str:
     parts: list[str] = []
-    for key in INST1_JOIN_KEYS:
+    for key in inst1_join_keys_between(table_a, table_b):
         if key in ("그룹회사코드", "그룹고객식별자"):
-            parts.append(f'trim({base_alias}."{key}") = trim({join_alias}."{key}")')
+            parts.append(f'trim({alias_a}."{key}") = trim({alias_b}."{key}")')
         else:
-            parts.append(f'{base_alias}."{key}" = {join_alias}."{key}"')
+            parts.append(f'{alias_a}."{key}" = {alias_b}."{key}"')
     return " AND ".join(parts)
 
 
 def _join_where_sql(
     primary_alias: str,
     *,
+    primary_table: str,
     month: str,
     group_company: str,
     customer_id: str | None,
     for_display: bool,
     group_by_columns: list[str] | None = None,
+    recent_months: int = 0,
 ) -> tuple[list[str], list[Any]]:
     filter_month = _should_filter_month_in_where(month, group_by_columns)
+    has_grp = inst1_table_has_group_company(primary_table)
+    recent_n = int(recent_months or 0)
     if for_display:
         where_parts: list[str] = []
-        if filter_month:
+        if recent_n > 0:
+            sub, _ = _recent_months_filter(
+                logical_table=primary_table,
+                group_company=group_company,
+                has_grp=has_grp,
+                recent_months=recent_n,
+                for_display=True,
+                column_ref=f'{primary_alias}."기준년월"',
+            )
+            where_parts.append(sub)
+        elif filter_month:
             where_parts.append(f'{primary_alias}."기준년월" = \'{month}\'')
-        where_parts.append(f'trim({primary_alias}."그룹회사코드") = \'{group_company}\'')
+        if has_grp:
+            where_parts.append(f'trim({primary_alias}."그룹회사코드") = \'{group_company}\'')
         if customer_id:
             where_parts.append(
                 f'trim({primary_alias}."그룹고객식별자") = \'{customer_id}\''
@@ -2635,11 +3343,23 @@ def _join_where_sql(
 
     where_parts: list[str] = []
     params: list[Any] = []
-    if filter_month:
+    if recent_n > 0:
+        sub, sub_params = _recent_months_filter(
+            logical_table=primary_table,
+            group_company=group_company,
+            has_grp=has_grp,
+            recent_months=recent_n,
+            for_display=False,
+            column_ref=f'{primary_alias}."기준년월"',
+        )
+        where_parts.append(sub)
+        params.extend(sub_params)
+    elif filter_month:
         where_parts.append(f'{primary_alias}."기준년월" = %s')
         params.append(month)
-    where_parts.append(f'trim({primary_alias}."그룹회사코드") = %s')
-    params.append(group_company)
+    if has_grp:
+        where_parts.append(f'trim({primary_alias}."그룹회사코드") = %s')
+        params.append(group_company)
     if customer_id:
         where_parts.append(f'trim({primary_alias}."그룹고객식별자") = %s')
         params.append(customer_id)
@@ -2653,6 +3373,7 @@ def build_join_aggregate_query(
     month: str,
     group_company: str,
     customer_id: str | None,
+    recent_months: int = 0,
 ) -> str:
     if len(join_tables) < 2:
         raise ValueError("조인 집계에는 2개 이상 테이블이 필요합니다.")
@@ -2676,11 +3397,13 @@ def build_join_aggregate_query(
     group_cols = [d["column"] for d in group_by_details]
     where_parts, _ = _join_where_sql(
         primary_alias,
+        primary_table=primary,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=True,
         group_by_columns=group_cols,
+        recent_months=recent_months,
     )
 
     from_sql = f"FROM {TABLE_SQL_FQN[ordered[0]]} {primary_alias}"
@@ -2688,7 +3411,7 @@ def build_join_aggregate_query(
         alias = INST1_TABLE_SQL_ALIAS[table]
         from_sql += (
             f'\nINNER JOIN {TABLE_SQL_FQN[table]} {alias} '
-            f"ON {_join_on_sql(primary_alias, alias)}"
+            f"ON {_join_on_sql(primary, primary_alias, table, alias)}"
         )
 
     where_clause = f'WHERE {" AND ".join(where_parts)}\n' if where_parts else ""
@@ -2709,6 +3432,7 @@ def _fetch_join_aggregate(
     month: str,
     group_company: str,
     customer_id: str | None,
+    recent_months: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
     display_sql = build_join_aggregate_query(
         join_tables,
@@ -2716,6 +3440,7 @@ def _fetch_join_aggregate(
         month=month,
         group_company=group_company,
         customer_id=customer_id,
+        recent_months=recent_months,
     )
     ordered = [t for t in INST1_TABLE_ORDER if t in join_tables]
     primary = ordered[0]
@@ -2734,11 +3459,13 @@ def _fetch_join_aggregate(
     group_cols = [d["column"] for d in group_by_details]
     where_parts, params = _join_where_sql(
         primary_alias,
+        primary_table=primary,
         month=month,
         group_company=group_company,
         customer_id=customer_id,
         for_display=False,
         group_by_columns=group_cols,
+        recent_months=recent_months,
     )
 
     from_sql = f"FROM {TABLE_SQL_FQN[ordered[0]]} {primary_alias}"
@@ -2746,7 +3473,7 @@ def _fetch_join_aggregate(
         alias = INST1_TABLE_SQL_ALIAS[table]
         from_sql += (
             f" INNER JOIN {TABLE_SQL_FQN[table]} {alias} "
-            f"ON {_join_on_sql(primary_alias, alias)}"
+            f"ON {_join_on_sql(primary, primary_alias, table, alias)}"
         )
 
     where_sql = f"WHERE {' AND '.join(where_parts)} " if where_parts else ""
@@ -2805,9 +3532,46 @@ def _result_key(table: str, analysis: dict[str, Any]) -> str:
     return table
 
 
+def _add_month_over_month_delta(
+    rows: list[dict[str, Any]],
+    group_cols: list[str],
+    *,
+    measure: str = VIRTUAL_AGGREGATE_MEASURE,
+) -> list[dict[str, Any]]:
+    """집계 결과에 전월대비 증감(measure 기준) 컬럼을 추가.
+
+    기준년월이 집계 축에 있어야 하며, 같은 (기준년월 제외) 그룹 키 내에서
+    직전(가장 가까운 이전) 기준년월 대비 증감을 계산한다.
+    가장 이른 달은 비교 대상이 없어 None.
+    """
+    if not rows or "기준년월" not in group_cols or measure not in rows[0]:
+        return rows
+    dims = [c for c in group_cols if c != "기준년월"]
+    months = sorted({str(r.get("기준년월")) for r in rows})
+    prev_of = {m: (months[i - 1] if i > 0 else None) for i, m in enumerate(months)}
+    value_map: dict[tuple[str, tuple], Any] = {}
+    for r in rows:
+        key = (str(r.get("기준년월")), tuple(str(r.get(d)) for d in dims))
+        value_map[key] = r.get(measure)
+    for r in rows:
+        cur_month = str(r.get("기준년월"))
+        dim_key = tuple(str(r.get(d)) for d in dims)
+        prev_month = prev_of.get(cur_month)
+        cur_val = r.get(measure)
+        delta: Any = None
+        if prev_month is not None:
+            prev_val = value_map.get((prev_month, dim_key))
+            if isinstance(prev_val, (int, float)) and isinstance(cur_val, (int, float)):
+                delta = cur_val - prev_val
+        r[DELTA_COLUMN] = delta
+    return rows
+
+
 def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
     """데이터 추출 전용 에이전트."""
     month = (analysis.get("month") or "").strip()
+    recent_months = int(analysis.get("recent_months") or 0)
+    want_delta = bool(analysis.get("delta"))
     group = (analysis.get("group_company") or DEFAULT_GROUP).strip()
     customer_id = analysis.get("customer_id")
     tables = list(analysis.get("tables") or ["TSHDEOA01", "TSHDEOA02"])
@@ -2815,14 +3579,9 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
         limit: int | None = None
     else:
         limit = int(analysis.get("limit") or MAX_ROWS)
-    zcd_only = (
-        tables == [TSHDE0ZCD_TABLE]
-        or (
-            TSHDE0ZCD_TABLE in tables
-            and TSHDEOA01_TABLE not in tables
-            and TSHDEOA02_TABLE not in tables
-            and TSHDEOA04_TABLE not in tables
-        )
+    zcd_only = tables == [TSHDE0ZCD_TABLE] or (
+        TSHDE0ZCD_TABLE in tables
+        and not any(t in tables for t in INST1_DATA_TABLES)
     )
     query_type = analysis.get("query_type") or "select"
     group_by = _normalize_group_by(analysis.get("group_by"))
@@ -2886,7 +3645,12 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                 month=month,
                 group_company=group,
                 customer_id=customer_id,
+                recent_months=recent_months,
             )
+            if want_delta:
+                rows = _add_month_over_month_delta(
+                    rows, [d["column"] for d in group_by_details]
+                )
             result[result_key] = rows
             queries[result_key] = sql
         except Exception as e:
@@ -2897,6 +3661,7 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                 month=month,
                 group_company=group,
                 customer_id=customer_id,
+                recent_months=recent_months,
             )
         total = sum(len(v) for v in result.values())
         if total == 0 and not errors:
@@ -2937,7 +3702,10 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                     aggregate_func=aggregate_func,
                     aggregate_measure_funcs=aggregate_measure_funcs,
                     explicit_measures=explicit_measures,
+                    recent_months=recent_months,
                 )
+                if want_delta:
+                    rows = _add_month_over_month_delta(rows, group_by)
             else:
                 rows, sql = _fetch_table(
                     schema,
@@ -2946,6 +3714,8 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                     group_company=group,
                     customer_id=customer_id,
                     limit=limit,
+                    logical_table=logical_table,
+                    recent_months=recent_months,
                 )
                 if query_type != "aggregate":
                     result_key = logical_table
@@ -2966,6 +3736,7 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                     aggregate_func=aggregate_func,
                     aggregate_measure_funcs=aggregate_measure_funcs,
                     explicit_measures=explicit_measures,
+                    recent_months=recent_months,
                 )
             else:
                 queries[logical_table] = build_select_query(
@@ -2975,6 +3746,8 @@ def extract_inst1_data(analysis: dict[str, Any]) -> dict[str, Any]:
                     group_company=group,
                     customer_id=customer_id,
                     limit=limit,
+                    logical_table=logical_table,
+                    recent_months=recent_months,
                 )
 
     total = sum(len(v) for v in result.values())
@@ -3075,16 +3848,20 @@ def format_inst1_reply(
         parts.append("")
         qt = analysis.get("query_type") or ""
         if qt in ("aggregate", "join_aggregate"):
+            parts.append("아래 엑셀 저장 버튼으로 조회 결과를 저장할 수 있습니다.")
             parts.append(
-                "아래 엑셀 저장·차트 생성 버튼으로 조회 결과를 활용할 수 있습니다."
+                f"「{AGGREGATE_CHART_FOLLOW_UP}」 또는 「{EXTERNAL_INSIGHT_FOLLOW_UP}」 "
+                "추천 질문으로 차트·분석을 이어갈 수 있습니다."
             )
         else:
             parts.append("아래 엑셀 저장 버튼으로 조회 결과를 저장할 수 있습니다.")
 
     parts.append("")
+    table_notes = ", ".join(
+        f"{INST1_TABLE_KOREAN_NAMES[t]}={t}" for t in INST1_TABLE_ORDER
+    )
     parts.append(
-        f"※ {TSHDEOA01_KOREAN_NAME}=TSHDEOA01, {TSHDEOA02_KOREAN_NAME}=TSHDEOA02, "
-        f"{TSHDEOA04_KOREAN_NAME}=TSHDEOA04. "
+        f"※ {table_notes}. "
         "코드 컬럼은 TSHDE0ZCD 인스턴스내용으로 표시됩니다."
     )
     return "\n".join(parts)

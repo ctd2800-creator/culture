@@ -141,6 +141,21 @@ def bulk_index_documents(
     return len(documents), errors
 
 
+def delete_documents_for_tables(
+    tables: set[str] | frozenset[str],
+    *,
+    client: Any | None = None,
+) -> int:
+    """지정 테이블명의 인덱스 문서 일괄 삭제."""
+    if not tables:
+        return 0
+    client = client or get_opensearch_client()
+    index = opensearch_index()
+    body = {"query": {"terms": {"table": sorted(tables)}}}
+    result = client.delete_by_query(index=index, body=body, refresh=True)
+    return int(result.get("deleted", 0))
+
+
 def knn_search(
     query_vector: list[float],
     *,

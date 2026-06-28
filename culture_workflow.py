@@ -18,8 +18,11 @@ from culture_inst1_agents import (
     analyze_question,
     aggregate_column_options_label,
     aggregate_column_pick_mode,
+    analyze_aggregate_external_insight,
+    build_aggregate_follow_up_questions,
     build_aggregate_chart_specs,
     build_aggregate_column_options,
+    build_chart_type_options,
     build_inst1_excel_export,
     build_pending_chart_payload,
     build_report_export,
@@ -30,9 +33,34 @@ from culture_inst1_agents import (
     format_inst1_aggregate_prompt_reply,
     format_inst1_reply,
     format_inst1_table_prompt_reply,
+    predict_rule_based_intent,
     summarize_inst1_table_data,
     with_agent_banner,
+    AGGREGATE_CHART_FOLLOW_UP,
+    EXTERNAL_INSIGHT_FOLLOW_UP,
     _normalize_group_by,
+    _resolve_analysis_agent_intent,
+    _wants_chart,
+    _wants_external_insight,
+)
+
+# 데이터 사전 파이프라인 UI — 스키마 검색 결과를 질문 분석에 쓰는 에이전트만
+# 데이터 사전(스키마 검색) 안내를 노출할 의도.
+# 테이블 추천·집계 컬럼 선택 에이전트는 데이터 사전 기반 분석이 아니므로 제외.
+SCHEMA_PIPELINE_UI_INTENTS = frozenset(
+    {
+        "inst1_extract",
+    }
+)
+
+# 데이터 사전(스키마 검색) 자체를 호출하지 않을 의도 — 규칙 기반으로 미리 판별.
+SCHEMA_PIPELINE_SKIP_INTENTS = frozenset(
+    {
+        "inst1_table_prompt",
+        "inst1_aggregate_prompt",
+        "inst1_column_desc",
+        "inst1_data_summary",
+    }
 )
 
 # Claude Sonnet 최신 (Bedrock) — BEDROCK_MODEL_ID 로 덮어쓸 수 있음
@@ -86,6 +114,7 @@ class CultureState(TypedDict, total=False):
     pending_aggregate: dict[str, Any]
     pending_chart: dict[str, Any]
     chart_specs: list[dict[str, Any]]
+    chart_type_options: list[dict[str, str]]
     excel_export: dict[str, Any]
     report_export: dict[str, Any]
     follow_up_questions: list[str]
@@ -94,6 +123,8 @@ class CultureState(TypedDict, total=False):
     aggregate_column_pick_mode: str
     chart_available: bool
     schema_pipeline_notice: str
+    schema_pipeline_ran: bool
+    allowed_tables: list[str] | None
 
 
 _graph_executor = None
@@ -209,6 +240,11 @@ def get_bedrock_runtime(region: str | None = None):
     return _bedrock_clients[region]
 
 
+def clear_bedrock_clients() -> None:
+    """만료된 세션 토큰 갱신 후 클라이언트 재생성용."""
+    _bedrock_clients.clear()
+
+
 def aws_credentials_configured() -> bool:
     if _bedrock_env_credentials() is not None:
         return True
@@ -245,10 +281,16 @@ def format_aws_error(
         code = err.get("Code", type(ce).__name__)
         msg = err.get("Message", str(ce))
         if code in ("ExpiredTokenException",) or "ExpiredToken" in code:
+            if os.environ.get("VERCEL"):
+                return (
+                    "AWS 임시 보안 토큰이 만료되었습니다. "
+                    "Vercel 환경 변수 AWS_ACCESS_KEY_ID·AWS_SECRET_ACCESS_KEY·"
+                    "AWS_SESSION_TOKEN(또는 AWS_SECURITY_TOKEN) 을 한 세트로 갱신한 뒤 Redeploy 하세요."
+                )
             return (
                 "AWS 임시 보안 토큰이 만료되었습니다. "
-                "Vercel 환경 변수 AWS_ACCESS_KEY_ID·AWS_SECRET_ACCESS_KEY·"
-                "AWS_SESSION_TOKEN(또는 AWS_SECURITY_TOKEN) 을 한 세트로 갱신한 뒤 Redeploy 하세요."
+                "MFA/STS 세션을 갱신한 뒤 ~/.aws/credentials 또는 .env.local 의 "
+                "ACCESS_KEY·SECRET·SESSION_TOKEN 을 한 세트로 맞추고 Culture 앱을 재시작하세요."
             )
         if code in ("UnrecognizedClientException",) or (
             "security token" in msg.lower() and "invalid" in msg.lower()
@@ -369,6 +411,27 @@ def ask_bedrock(system: str, messages: list[dict], max_tokens: int = 2048) -> st
                 err_body = e.response.get("Error") or {}
                 code = err_body.get("Code", "")
                 aws_msg = err_body.get("Message", "")
+                if code in ("ExpiredTokenException",) or "ExpiredToken" in code:
+                    clear_bedrock_clients()
+                    try:
+                        response = get_bedrock_runtime(region).invoke_model(
+                            modelId=model_id,
+                            body=body,
+                            accept="application/json",
+                            contentType="application/json",
+                        )
+                        response_body = json.loads(response["body"].read())
+                        return response_body["content"][0]["text"].strip()
+                    except ClientError as retry_err:
+                        last_client = retry_err
+                        last_error = retry_err
+                        raise RuntimeError(
+                            format_aws_error(
+                                retry_err,
+                                attempt_model=model_id,
+                                attempt_region=region,
+                            )
+                        ) from retry_err
                 if (
                     "explicit deny" in aws_msg.lower()
                     and model_id.startswith("apac.")
@@ -408,11 +471,40 @@ def ask_bedrock(system: str, messages: list[dict], max_tokens: int = 2048) -> st
 # --- LangGraph nodes ---
 
 
+def _should_run_schema_pipeline(state: CultureState) -> bool:
+    """직전 집계 follow-up(차트·분석)·테이블 추천·집계 컬럼 선택은 스키마 검색 불필요."""
+    msg = (state.get("user_message") or "").strip()
+    pending = state.get("pending_chart") or {}
+    if pending.get("rows") and (_wants_chart(msg) or _wants_external_insight(msg)):
+        return False
+    # 테이블 추천·집계 컬럼 선택 에이전트는 데이터 사전을 호출하지 않는다.
+    predicted = predict_rule_based_intent(
+        msg,
+        pending_aggregate=state.get("pending_aggregate") or None,
+        pending_chart=state.get("pending_chart") or None,
+    )
+    if predicted in SCHEMA_PIPELINE_SKIP_INTENTS:
+        return False
+    return True
+
+
+def _schema_notice_for_reply(state: CultureState) -> str:
+    """실제 스키마 파이프라인을 탄 질문 분석 응답에만 안내 문구 노출."""
+    if not state.get("schema_pipeline_ran"):
+        return ""
+    analysis = state.get("question_analysis") or {}
+    intent = (analysis.get("intent") or "").strip()
+    if intent not in SCHEMA_PIPELINE_UI_INTENTS:
+        return ""
+    return (state.get("schema_pipeline_notice") or "").strip()
+
+
 def analyze_question_node(state: CultureState) -> dict[str, Any]:
     """질문 분석 에이전트 — INST1 추출 vs 테이블 추천 vs 일반 대화."""
     msg = state.get("user_message", "")
     schema_context = ""
     schema_pipeline_notice = ""
+    schema_pipeline_ran = False
     try:
         from schema_vector.config import schema_vector_enabled
         from schema_vector.retriever import (
@@ -421,8 +513,9 @@ def analyze_question_node(state: CultureState) -> dict[str, Any]:
             search_schema,
         )
 
-        if schema_vector_enabled():
+        if schema_vector_enabled() and _should_run_schema_pipeline(state):
             hits = search_schema(msg, k=6)
+            schema_pipeline_ran = True
             schema_context = hits_to_schema_context(hits)
             schema_pipeline_notice = build_schema_pipeline_notice(msg, hits)
     except Exception:
@@ -434,11 +527,16 @@ def analyze_question_node(state: CultureState) -> dict[str, Any]:
         pending_chart=state.get("pending_chart") or None,
         schema_context=schema_context or None,
     )
-    out: dict[str, Any] = {"question_analysis": analysis}
+    out: dict[str, Any] = {
+        "question_analysis": analysis,
+        "schema_pipeline_ran": schema_pipeline_ran,
+    }
     if schema_context:
         out["schema_search_context"] = schema_context
-    if schema_pipeline_notice:
+    if schema_pipeline_ran and schema_pipeline_notice:
         out["schema_pipeline_notice"] = schema_pipeline_notice
+    elif not schema_pipeline_ran:
+        out["schema_pipeline_notice"] = ""
     return out
 
 
@@ -507,27 +605,90 @@ def column_desc_node(state: CultureState) -> dict[str, Any]:
 
 
 def chart_node(state: CultureState) -> dict[str, Any]:
-    """집계 데이터 막대 차트 에이전트."""
+    """집계 데이터 차트 에이전트 — 차트 유형 선택 단계."""
     analysis = state.get("question_analysis") or {}
     pending = state.get("pending_chart") or {}
     try:
-        specs = build_aggregate_chart_specs(pending)
-        if not specs:
+        if not pending.get("rows"):
             raise ValueError(
                 "차트로 그릴 집계 데이터가 없습니다. 먼저 집계 데이터를 조회해 주세요."
             )
-        text = format_chart_agent_reply(analysis, pending, specs)
+        if not pending.get("chartable"):
+            raise ValueError(
+                "차트로 시각화할 숫자 집계 항목이 없습니다. 집계 데이터를 다시 조회해 주세요."
+            )
+        text = format_chart_agent_reply(analysis, pending)
+        options = build_chart_type_options()
     except Exception as e:
         return {"error": str(e)}
-    display = pending.get("display_label") or "집계 데이터"
     return {
         "summary": text,
         "reply": text,
-        "chart_specs": specs,
-        "excel_export": {},
-        "report_export": {},
-        "pending_chart": {},
+        "chart_specs": [],
+        "chart_type_options": options,
+        "follow_up_questions": [EXTERNAL_INSIGHT_FOLLOW_UP],
     }
+
+
+def route_from_start(
+    state: CultureState,
+) -> Literal["analyze", "external_insight"]:
+    """직전 집계 결과가 있으면 분석 요청은 질문 분석 없이 분석 에이전트로 직행."""
+    msg = (state.get("user_message") or "").strip()
+    pending = state.get("pending_chart") or {}
+    if pending.get("rows") and _wants_external_insight(msg):
+        return "external_insight"
+    return "analyze"
+
+
+def external_insight_node(state: CultureState) -> dict[str, Any]:
+    """분석 에이전트 — 직전 집계 결과만 사용(데이터 추출 없음)."""
+    pending = state.get("pending_chart") or {}
+    analysis = state.get("question_analysis") or {}
+    if analysis.get("intent") != "inst1_external_insight":
+        analysis = _resolve_analysis_agent_intent(
+            state.get("user_message", ""),
+            pending,
+        )
+    try:
+        text = analyze_aggregate_external_insight(
+            pending,
+            state.get("user_message", ""),
+            analysis,
+            bedrock_ask=ask_bedrock,
+        )
+        report_export = build_report_export(
+            agent="inst1_external_insight",
+            content=text,
+            table_label=pending.get("display_label") or "분석",
+            month=str(pending.get("month") or ""),
+        )
+    except Exception as e:
+        return {"error": str(e)}
+    out: dict[str, Any] = {
+        "summary": text,
+        "reply": text,
+        "report_export": report_export,
+        "question_analysis": analysis,
+    }
+    # 분석 결과 강화 — 직전 데이터 추출 표와 차트 에이전트가 만든 차트를 함께 표시
+    result_key = pending.get("result_key") or "집계결과"
+    rows = list(pending.get("rows") or [])
+    if rows:
+        out["inst1_data"] = {result_key: rows}
+        out["inst1_result_labels"] = {
+            result_key: pending.get("display_label") or result_key
+        }
+        column_order = list(pending.get("column_order") or [])
+        if column_order:
+            out["inst1_column_orders"] = {result_key: column_order}
+        query = (pending.get("query") or "").strip()
+        if query:
+            out["inst1_queries"] = {result_key: query}
+    charts = list(pending.get("charts") or [])
+    if charts:
+        out["chart_specs"] = charts
+    return out
 
 
 def data_summary_node(state: CultureState) -> dict[str, Any]:
@@ -553,7 +714,7 @@ def data_summary_node(state: CultureState) -> dict[str, Any]:
 
 
 def fetch_inst1_node(state: CultureState) -> dict[str, Any]:
-    """TSHDEOA01·TSHDEOA02 데이터 추출 전용 에이전트."""
+    """TSHDEOA01~06 데이터 추출 전용 에이전트."""
     analysis = state.get("question_analysis") or {}
     try:
         result = extract_inst1_data(analysis)
@@ -575,7 +736,6 @@ def fetch_inst1_node(state: CultureState) -> dict[str, Any]:
         "month": result.get("month", ""),
         "extract_tables": list((result.get("inst1_data") or {}).keys()),
         "notice": "; ".join(result.get("errors") or []) or "",
-        "schema_pipeline_notice": state.get("schema_pipeline_notice") or "",
     }
 
 
@@ -585,6 +745,7 @@ def format_inst1_node(state: CultureState) -> dict[str, Any]:
     analysis = state.get("question_analysis") or {}
     extract_result = {
         "inst1_data": state.get("inst1_data") or {},
+        "inst1_column_orders": state.get("inst1_column_orders") or {},
         "inst1_result_labels": state.get("inst1_result_labels") or {},
         "inst1_queries": state.get("inst1_queries") or {},
         "month": state.get("month") or analysis.get("month"),
@@ -598,14 +759,76 @@ def format_inst1_node(state: CultureState) -> dict[str, Any]:
     if analysis.get("query_type") == "aggregate":
         out["pending_aggregate"] = {}
     pending_chart = build_pending_chart_payload(analysis, extract_result)
+    chartable = bool(pending_chart.get("chartable"))
     if pending_chart:
         out["pending_chart"] = pending_chart
-        out["chart_available"] = True
+    query_type = analysis.get("query_type") or ""
+    if (
+        query_type in ("aggregate", "join_aggregate")
+        and extract_result.get("total_rows", 0) > 0
+    ):
+        out["follow_up_questions"] = build_aggregate_follow_up_questions(
+            chart_available=chartable,
+        )
     if analysis.get("intent") == "inst1_extract" and extract_result.get("total_rows", 0) > 0:
         excel_export = build_inst1_excel_export(extract_result, analysis)
         if excel_export:
             out["excel_export"] = excel_export
     return out
+
+
+# 테이블 접근 권한을 검사해야 하는 intent (실제 테이블 데이터·메타에 접근)
+_TABLE_ACCESS_INTENTS = {
+    "inst1_extract",
+    "inst1_table_prompt",
+    "inst1_aggregate_prompt",
+    "inst1_column_desc",
+    "inst1_data_summary",
+}
+
+
+def _analysis_referenced_tables(analysis: dict[str, Any]) -> set[str]:
+    """질문 분석이 가리키는 모든 INST1 테이블 코드."""
+    refs: set[str] = set()
+    for t in analysis.get("tables") or []:
+        if t:
+            refs.add(t)
+    for t in analysis.get("join_tables") or []:
+        if t:
+            refs.add(t)
+    agg = analysis.get("aggregate_table")
+    if agg:
+        refs.add(agg)
+    return refs
+
+
+def denied_tables_for_state(state: CultureState) -> set[str]:
+    """현재 사용자 권한으로 접근 불가한, 질문이 가리키는 테이블 집합."""
+    allowed = state.get("allowed_tables")
+    if allowed is None:
+        return set()  # 제한 없음(전체 접근)
+    allowed_set = {t for t in allowed if t}
+    analysis = state.get("question_analysis") or {}
+    if (analysis.get("intent") or "") not in _TABLE_ACCESS_INTENTS:
+        return set()
+    referenced = _analysis_referenced_tables(analysis)
+    return {t for t in referenced if t not in allowed_set}
+
+
+def permission_denied_node(state: CultureState) -> dict[str, Any]:
+    """권한 없는 테이블 조회 요청 거부 응답."""
+    analysis = state.get("question_analysis") or {}
+    denied = sorted(denied_tables_for_state(state))
+    labels = ", ".join(
+        f"{INST1_TABLE_KOREAN_NAMES.get(t, t)}({t})" for t in denied
+    ) or "요청하신 테이블"
+    text = (
+        f"요청하신 {labels} 에 대한 접근 권한이 없습니다.\n"
+        "현재 계정으로 조회할 수 있는 테이블만 질문해 주세요. "
+        "(권한이 필요하면 관리자에게 문의하세요.)"
+    )
+    text = with_agent_banner(text, analysis)
+    return {"summary": text, "reply": text}
 
 
 def route_after_analyze(
@@ -618,8 +841,12 @@ def route_after_analyze(
     "column_desc",
     "data_summary",
     "chart",
+    "external_insight",
+    "permission_denied",
 ]:
     analysis = state.get("question_analysis") or {}
+    if denied_tables_for_state(state):
+        return "permission_denied"
     if analysis.get("intent") == "inst1_table_prompt":
         return "table_prompt"
     if analysis.get("intent") == "inst1_aggregate_prompt":
@@ -630,6 +857,8 @@ def route_after_analyze(
         return "data_summary"
     if analysis.get("intent") == "inst1_chart":
         return "chart"
+    if analysis.get("intent") == "inst1_external_insight":
+        return "external_insight"
     if analysis.get("intent") == "inst1_extract":
         return "fetch_inst1"
     return "general"
@@ -660,6 +889,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
     preset = (state.get("reply") or "").strip()
     summary = (state.get("summary") or "").strip()
     charts = list(state.get("chart_specs") or [])
+    chart_type_options = list(state.get("chart_type_options") or [])
     excel_export = dict(state.get("excel_export") or {})
     report_export = dict(state.get("report_export") or {})
     follow_up = list(state.get("follow_up_questions") or [])
@@ -667,7 +897,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
     aggregate_label = (state.get("aggregate_column_label") or "").strip()
     aggregate_pick_mode = (state.get("aggregate_column_pick_mode") or "append").strip()
     chart_available = bool(state.get("chart_available"))
-    schema_pipeline_notice = (state.get("schema_pipeline_notice") or "").strip()
+    schema_pipeline_notice = _schema_notice_for_reply(state)
     if preset:
         return {
             "reply": preset,
@@ -675,6 +905,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
             "notice": (state.get("notice") or "").strip(),
             "schema_pipeline_notice": schema_pipeline_notice,
             "chart_specs": charts,
+            "chart_type_options": chart_type_options,
             "excel_export": excel_export,
             "report_export": report_export,
             "follow_up_questions": follow_up,
@@ -690,6 +921,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
             "notice": "",
             "schema_pipeline_notice": schema_pipeline_notice,
             "chart_specs": charts,
+            "chart_type_options": chart_type_options,
             "excel_export": excel_export,
             "report_export": report_export,
             "follow_up_questions": follow_up,
@@ -704,6 +936,7 @@ def reply_node(state: CultureState) -> dict[str, Any]:
         "notice": (state.get("notice") or "").strip(),
         "schema_pipeline_notice": schema_pipeline_notice,
         "chart_specs": charts,
+        "chart_type_options": chart_type_options,
         "excel_export": excel_export,
         "report_export": report_export,
         "follow_up_questions": follow_up,
@@ -722,12 +955,21 @@ def build_culture_graph():
     graph.add_node("column_desc", column_desc_node)
     graph.add_node("data_summary", data_summary_node)
     graph.add_node("chart", chart_node)
+    graph.add_node("external_insight", external_insight_node)
     graph.add_node("fetch_inst1", fetch_inst1_node)
     graph.add_node("format_inst1", format_inst1_node)
     graph.add_node("general", general_chat_node)
+    graph.add_node("permission_denied", permission_denied_node)
     graph.add_node("reply", reply_node)
 
-    graph.add_edge(START, "analyze")
+    graph.add_conditional_edges(
+        START,
+        route_from_start,
+        {
+            "analyze": "analyze",
+            "external_insight": "external_insight",
+        },
+    )
     graph.add_conditional_edges(
         "analyze",
         route_after_analyze,
@@ -739,13 +981,17 @@ def build_culture_graph():
             "column_desc": "column_desc",
             "data_summary": "data_summary",
             "chart": "chart",
+            "external_insight": "external_insight",
+            "permission_denied": "permission_denied",
         },
     )
+    graph.add_edge("permission_denied", "reply")
     graph.add_edge("table_prompt", "reply")
     graph.add_edge("aggregate_prompt", "reply")
     graph.add_edge("column_desc", "reply")
     graph.add_edge("data_summary", "reply")
     graph.add_edge("chart", "reply")
+    graph.add_edge("external_insight", "reply")
     graph.add_edge("fetch_inst1", "format_inst1")
     graph.add_edge("format_inst1", "reply")
     graph.add_edge("general", "reply")
@@ -776,6 +1022,7 @@ def run_workflow(
     history: list[dict[str, str]] | None = None,
     pending_aggregate: dict[str, Any] | None = None,
     pending_chart: dict[str, Any] | None = None,
+    allowed_tables: list[str] | None = None,
 ) -> CultureState:
     """워크플로우 전체 실행 → 최종 State 반환."""
     initial: CultureState = {
@@ -793,6 +1040,7 @@ def run_workflow(
         "pending_aggregate": pending_aggregate or {},
         "pending_chart": pending_chart or {},
         "chart_specs": [],
+        "chart_type_options": [],
         "excel_export": {},
         "report_export": {},
         "follow_up_questions": [],
@@ -801,6 +1049,8 @@ def run_workflow(
         "aggregate_column_pick_mode": "append",
         "chart_available": False,
         "schema_pipeline_notice": "",
+        "schema_pipeline_ran": False,
+        "allowed_tables": allowed_tables,
     }
     try:
         return get_executor().invoke(initial)

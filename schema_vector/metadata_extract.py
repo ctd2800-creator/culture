@@ -6,10 +6,12 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from supabase.table_config import (
+from culture_db.table_config import (
     COLUMN_INSTANCE_IDS,
+    INST1_COLUMN_DEFINITIONS,
     INST1_TABLE_ALIASES,
     INST1_TABLE_KOREAN_NAMES,
+    LEGACY_EXCLUDED_TABLES,
 )
 
 
@@ -122,6 +124,8 @@ def extract_table_metadata(conn, schemas: list[str] | None = None) -> list[Table
         column_comment,
         ordinal,
     ) in rows:
+        if table_name in LEGACY_EXCLUDED_TABLES:
+            continue
         key = (schema_name, table_name)
         if key not in tables:
             korean = INST1_TABLE_KOREAN_NAMES.get(table_name, "")
@@ -146,6 +150,16 @@ def extract_table_metadata(conn, schemas: list[str] | None = None) -> list[Table
         )
 
     return sorted(tables.values(), key=lambda t: (t.schema, t.table))
+
+
+def enrich_with_column_definitions(table: TableMeta) -> TableMeta:
+    """table_config 컬럼정의내용을 comment에 반영."""
+    defs = INST1_COLUMN_DEFINITIONS.get(table.table, {})
+    for col in table.columns:
+        defn = defs.get(col.name)
+        if defn:
+            col.comment = defn
+    return table
 
 
 def enrich_with_instance_ids(table: TableMeta) -> TableMeta:

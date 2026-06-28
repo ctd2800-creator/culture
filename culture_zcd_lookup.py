@@ -7,13 +7,13 @@ from typing import Any
 
 import psycopg2
 
-from supabase.table_config import (
+from culture_db.table_config import (
     COLUMN_INSTANCE_IDS,
     TSHDE0ZCD_SCHEMA,
     TSHDE0ZCD_TABLE,
 )
 
-from supabase.culture_db import connect_culture_db
+from culture_db.culture_db import connect_culture_db
 
 _FALLBACK_GROUP_CODES = ("K00", "KFG", "KB0", "KC0")
 
