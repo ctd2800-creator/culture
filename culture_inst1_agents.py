@@ -535,15 +535,13 @@ def _resolve_group_column(name: str, table: str) -> str | None:
 
 
 def _sql_group_col(table: str, col: str) -> str:
-    if col in INST1_NUMERIC_COLUMNS.get(table, frozenset()):
-        return f'"{col}"'
-    return f'trim("{col}")'
+    # 컬럼이 character(N) 고정길이지만 값에 패딩이 없어 trim() 불필요.
+    # trim()을 쓰면 인덱스를 타지 못하므로 원본 컬럼을 그대로 사용한다.
+    return f'"{col}"'
 
 
 def _sql_qual_group_col(alias: str, logical_table: str, col: str) -> str:
-    if col in INST1_NUMERIC_COLUMNS.get(logical_table, frozenset()):
-        return f'{alias}."{col}"'
-    return f'trim({alias}."{col}")'
+    return f'{alias}."{col}"'
 
 
 def _normalize_group_by(value: Any) -> list[str]:
@@ -2910,9 +2908,9 @@ def _recent_months_filter(
     params: list[Any] = []
     if has_grp:
         if for_display:
-            grp = f"WHERE trim(\"그룹회사코드\") = '{group_company}' "
+            grp = f"WHERE \"그룹회사코드\" = '{group_company}' "
         else:
-            grp = 'WHERE trim("그룹회사코드") = %s '
+            grp = 'WHERE "그룹회사코드" = %s '
             params.append(group_company)
     else:
         grp = ""
@@ -2950,9 +2948,9 @@ def _base_where_parts(
         elif filter_month:
             where_parts.append(f'"기준년월" = \'{month}\'')
         if has_grp:
-            where_parts.append(f'trim("그룹회사코드") = \'{group_company}\'')
+            where_parts.append(f'"그룹회사코드" = \'{group_company}\'')
         if customer_id:
-            where_parts.append(f'trim("그룹고객식별자") = \'{customer_id}\'')
+            where_parts.append(f'"그룹고객식별자" = \'{customer_id}\'')
         return where_parts, []
 
     where_parts: list[str] = []
@@ -2971,10 +2969,10 @@ def _base_where_parts(
         where_parts.append('"기준년월" = %s')
         params.append(month)
     if has_grp:
-        where_parts.append('trim("그룹회사코드") = %s')
+        where_parts.append('"그룹회사코드" = %s')
         params.append(group_company)
     if customer_id:
-        where_parts.append('trim("그룹고객식별자") = %s')
+        where_parts.append('"그룹고객식별자" = %s')
         params.append(customer_id)
     return where_parts, params
 
@@ -3165,8 +3163,8 @@ def _zcd_where_parts(
     for_display: bool,
 ) -> tuple[list[str], list[Any]]:
     if for_display:
-        return [f'trim("그룹회사코드") = \'{group_company}\''], []
-    return ['trim("그룹회사코드") = %s'], [group_company]
+        return [f'"그룹회사코드" = \'{group_company}\''], []
+    return ['"그룹회사코드" = %s'], [group_company]
 
 
 def build_zcd_select_query(
@@ -3298,10 +3296,7 @@ def _fetch_aggregate(
 def _join_on_sql(table_a: str, alias_a: str, table_b: str, alias_b: str) -> str:
     parts: list[str] = []
     for key in inst1_join_keys_between(table_a, table_b):
-        if key in ("그룹회사코드", "그룹고객식별자"):
-            parts.append(f'trim({alias_a}."{key}") = trim({alias_b}."{key}")')
-        else:
-            parts.append(f'{alias_a}."{key}" = {alias_b}."{key}"')
+        parts.append(f'{alias_a}."{key}" = {alias_b}."{key}"')
     return " AND ".join(parts)
 
 
@@ -3334,10 +3329,10 @@ def _join_where_sql(
         elif filter_month:
             where_parts.append(f'{primary_alias}."기준년월" = \'{month}\'')
         if has_grp:
-            where_parts.append(f'trim({primary_alias}."그룹회사코드") = \'{group_company}\'')
+            where_parts.append(f'{primary_alias}."그룹회사코드" = \'{group_company}\'')
         if customer_id:
             where_parts.append(
-                f'trim({primary_alias}."그룹고객식별자") = \'{customer_id}\''
+                f'{primary_alias}."그룹고객식별자" = \'{customer_id}\''
             )
         return where_parts, []
 
@@ -3358,10 +3353,10 @@ def _join_where_sql(
         where_parts.append(f'{primary_alias}."기준년월" = %s')
         params.append(month)
     if has_grp:
-        where_parts.append(f'trim({primary_alias}."그룹회사코드") = %s')
+        where_parts.append(f'{primary_alias}."그룹회사코드" = %s')
         params.append(group_company)
     if customer_id:
-        where_parts.append(f'trim({primary_alias}."그룹고객식별자") = %s')
+        where_parts.append(f'{primary_alias}."그룹고객식별자" = %s')
         params.append(customer_id)
     return where_parts, params
 

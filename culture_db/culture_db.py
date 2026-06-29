@@ -58,11 +58,21 @@ def using_aurora() -> bool:
 
 
 def connect_culture_db(*, connect_timeout: int = 15):
-    """Aurora PostgreSQL 연결."""
+    """Aurora PostgreSQL 연결.
+
+    대용량(수천만 행) 집계 시 디스크 외부정렬을 피하도록 세션 work_mem를
+    상향한다. AURORA_WORK_MEM(예: '256MB')로 조정 가능.
+    """
     import psycopg2
 
     global _db_url_cache
     url = get_culture_db_url()
-    conn = psycopg2.connect(url, connect_timeout=connect_timeout)
+    work_mem = os.environ.get("AURORA_WORK_MEM", "256MB").strip()
+    options = f"-c work_mem={work_mem}" if work_mem else None
+    conn = psycopg2.connect(
+        url,
+        connect_timeout=connect_timeout,
+        options=options,
+    )
     _db_url_cache = url
     return conn

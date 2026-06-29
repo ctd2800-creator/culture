@@ -130,6 +130,7 @@ def main() -> None:
     from culture_db.tshdeoa03_setup import ensure_tshdeoa03_table, sync_tshdeoa03_column_comments
     from culture_db.tshdeoa05_setup import ensure_tshdeoa05_table, sync_tshdeoa05_column_comments
     from culture_db.tshdeoa06_setup import ensure_tshdeoa06_table, sync_tshdeoa06_column_comments
+    from culture_db.tshdeoa_indexes import ensure_tshdeoa_indexes
 
     per_month = TSHDEOA01_202604_TARGET_COUNT
     months = TSHDEOA01_SEED_MONTHS
@@ -202,6 +203,9 @@ def main() -> None:
                             (month,),
                         )
                     print(f"  {table} {month}: {cur.fetchone()[0]:,}", flush=True)
+
+        print("\n=== ensure indexes ===", flush=True)
+        ensure_tshdeoa_indexes(conn)
 
     elapsed = time.time() - started
     print(f"\nOK: Aurora TSHDEOA03/05/06 seed complete ({elapsed:.0f}s)", flush=True)
