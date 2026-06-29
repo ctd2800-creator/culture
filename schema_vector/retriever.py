@@ -21,8 +21,6 @@ from schema_vector.bedrock_embed import embed_text
 from schema_vector.config import schema_vector_enabled
 from schema_vector.opensearch_store import knn_search
 
-# 안내 문구에서 '신뢰할 만한' 후보로 간주하는 최소 유사도.
-SCHEMA_NOTICE_MIN_SCORE = 0.65
 # 재랭킹 가중치
 _BOOST_COLUMN_EXACT = 0.20  # 질문에 컬럼명이 그대로 등장
 _BOOST_ALIAS = 0.18  # 질문에 컬럼 별칭이 등장
@@ -118,16 +116,10 @@ def build_schema_pipeline_notice(query: str, hits: list[dict[str, Any]]) -> str:
     if len(tables) > 3:
         table_summary += f" 외 {len(tables) - 3}개"
 
-    # 최고 유사도가 낮으면 후보 신뢰도가 낮음을 명시해 오해를 줄인다.
-    top_score = score if isinstance(score, (int, float)) else 0.0
-    confidence = (
-        "" if top_score >= SCHEMA_NOTICE_MIN_SCORE
-        else " (유사도가 낮아 참고용 후보이며, 실제 분석 테이블은 질문 의도에 따라 정해집니다)"
-    )
     return (
         "[데이터 사전] 메타 추출 → Bedrock 임베딩 → OpenSearch k-NN 파이프라인이 정상 동작했습니다. "
         f"질문과 유사한 스키마 {len(hits)}건을 검색했습니다 (인덱스: {index}, 최고 유사도 {score_txt}: {top_label}). "
-        f"스키마 검색 후보: {table_summary}.{confidence}"
+        f"스키마 검색 후보: {table_summary}."
     )
 
 
