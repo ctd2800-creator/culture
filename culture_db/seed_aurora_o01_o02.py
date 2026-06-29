@@ -86,6 +86,7 @@ def main() -> None:
         iter_all_o02_seed_rows,
     )
     from culture_db.tshdeoa_indexes import ensure_tshdeoa_indexes
+    from culture_db.summary_tables import build_summary_tables
 
     months = TSHDEOA01_SEED_MONTHS
     started = time.time()
@@ -132,6 +133,9 @@ def main() -> None:
 
         print("\n=== ensure indexes ===", flush=True)
         ensure_tshdeoa_indexes(conn)
+
+        print("\n=== build summary tables ===", flush=True)
+        build_summary_tables(conn)
 
     elapsed = time.time() - started
     print(f"\nOK: Aurora TSHDEOA01/02 seed complete ({elapsed:.0f}s)", flush=True)

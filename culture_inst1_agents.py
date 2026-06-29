@@ -5,6 +5,7 @@ INST1 TSHDEOA01 / TSHDEOA02 질문 분석·데이터 추출 에이전트.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from decimal import Decimal
 from typing import Any
@@ -14,6 +15,11 @@ import os
 import psycopg2
 
 from culture_zcd_lookup import decode_inst1_data
+from culture_db.summary_tables import (
+    build_summary_query,
+    find_join_summary,
+    find_single_summary,
+)
 from culture_db.table_config import (
     INST1_AGGREGATE_COLUMNS,
     INST1_COLUMN_DEFINITIONS,
@@ -27,6 +33,7 @@ from culture_db.table_config import (
     INST1_TABLE_ORDER,
     INST1_TABLE_SQL_ALIAS,
     inst1_join_keys_between,
+    inst1_join_is_customer_unique,
     inst1_table_has_group_company,
     TSHDEOA01_KOREAN_NAME,
     TSHDEOA01_SCHEMA,
@@ -3225,6 +3232,51 @@ def _fetch_zcd_table(
     return rows, display_sql
 
 
+def _run_summary_query(spec, cols, *, group_company, month, recent_months):
+    """요약 테이블 조회 실행. 실패 시 None 반환(원본 쿼리로 폴백)."""
+    try:
+        exec_sql, params, display_sql = build_summary_query(
+            spec,
+            group_by_cols=cols,
+            group_company=group_company,
+            month=month,
+            recent_months=recent_months,
+        )
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(exec_sql, params)
+                rcols = [d[0] for d in cur.description]
+                rows = [_row_to_dict(rcols, row) for row in cur.fetchall()]
+        return rows, display_sql
+    except Exception as e:  # noqa: BLE001 - 어떤 오류든 원본 경로로 폴백
+        logging.warning("요약 테이블 조회 실패(%s), 원본 조회로 폴백: %s", spec.name, e)
+        return None
+
+
+def _try_summary_aggregate(
+    logical_table: str,
+    cols: list[str],
+    measures: list[str],
+    *,
+    group_company: str,
+    customer_id: str | None,
+    month: str,
+    recent_months: int,
+):
+    """단일 테이블 COUNT(고객수) 집계를 요약 테이블로 가속. 불가하면 None."""
+    if customer_id or not group_company:
+        return None
+    if measures != [VIRTUAL_AGGREGATE_MEASURE]:
+        return None
+    requested_dims = {c for c in cols if c != "기준년월"}
+    spec = find_single_summary(logical_table, requested_dims)
+    if spec is None:
+        return None
+    return _run_summary_query(
+        spec, cols, group_company=group_company, month=month, recent_months=recent_months
+    )
+
+
 def _fetch_aggregate(
     schema: str,
     table: str,
@@ -3245,6 +3297,17 @@ def _fetch_aggregate(
         aggregate_measures,
         explicit=explicit_measures,
     )
+    fast = _try_summary_aggregate(
+        logical_table,
+        cols,
+        measures,
+        group_company=group_company,
+        customer_id=customer_id,
+        month=month,
+        recent_months=recent_months,
+    )
+    if fast is not None:
+        return fast
     measure_funcs = dict(aggregate_measure_funcs or {})
     if not measure_funcs:
         func_sql = _normalize_aggregate_func(aggregate_func)
@@ -3298,6 +3361,20 @@ def _join_on_sql(table_a: str, alias_a: str, table_b: str, alias_b: str) -> str:
     for key in inst1_join_keys_between(table_a, table_b):
         parts.append(f'{alias_a}."{key}" = {alias_b}."{key}"')
     return " AND ".join(parts)
+
+
+def _join_customer_count_expr(ordered_tables: list[str], primary_alias: str) -> str:
+    """조인 고객수 집계 표현식.
+
+    조인이 그룹고객식별자 기준 1:1(fan-out 없음)이면 COUNT(DISTINCT) 대신
+    COUNT(...)를 써서 정렬 기반 GroupAggregate를 피하고 HashAggregate로
+    처리되게 한다(대용량에서 큰 폭의 성능 향상). TSHDEOA05처럼 고객당 여러
+    행이 가능한 테이블이 끼면 정확성을 위해 DISTINCT를 유지한다.
+    """
+    col = f'{primary_alias}."그룹고객식별자"'
+    if inst1_join_is_customer_unique(ordered_tables):
+        return f'COUNT({col}) AS "고객수"'
+    return f'COUNT(DISTINCT {col}) AS "고객수"'
 
 
 def _join_where_sql(
@@ -3410,13 +3487,40 @@ def build_join_aggregate_query(
         )
 
     where_clause = f'WHERE {" AND ".join(where_parts)}\n' if where_parts else ""
+    count_expr = _join_customer_count_expr(ordered, primary_alias)
     return (
         f"SELECT {select_cols},\n"
-        f'       COUNT(DISTINCT {primary_alias}."그룹고객식별자") AS "고객수"\n'
+        f"       {count_expr}\n"
         f"{from_sql}\n"
         f"{where_clause}"
         f"GROUP BY {group_expr}\n"
         f"ORDER BY {order_expr};"
+    )
+
+
+def _try_summary_join_aggregate(
+    join_tables: list[str],
+    group_by_details: list[dict[str, str]],
+    *,
+    group_company: str,
+    customer_id: str | None,
+    month: str,
+    recent_months: int,
+):
+    """조인 COUNT(고객수) 집계를 요약 테이블로 가속. 불가하면 None."""
+    if customer_id or not group_company:
+        return None
+    requested_pairs = {
+        (d["table"], d["column"])
+        for d in group_by_details
+        if d["column"] != "기준년월"
+    }
+    spec = find_join_summary(join_tables, requested_pairs)
+    if spec is None:
+        return None
+    cols = [d["column"] for d in group_by_details]
+    return _run_summary_query(
+        spec, cols, group_company=group_company, month=month, recent_months=recent_months
     )
 
 
@@ -3429,6 +3533,16 @@ def _fetch_join_aggregate(
     customer_id: str | None,
     recent_months: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
+    fast = _try_summary_join_aggregate(
+        join_tables,
+        group_by_details,
+        group_company=group_company,
+        customer_id=customer_id,
+        month=month,
+        recent_months=recent_months,
+    )
+    if fast is not None:
+        return fast
     display_sql = build_join_aggregate_query(
         join_tables,
         group_by_details,
@@ -3472,9 +3586,10 @@ def _fetch_join_aggregate(
         )
 
     where_sql = f"WHERE {' AND '.join(where_parts)} " if where_parts else ""
+    count_expr = _join_customer_count_expr(ordered, primary_alias)
     exec_sql = (
         f"SELECT {select_cols}, "
-        f'COUNT(DISTINCT {primary_alias}."그룹고객식별자") AS "고객수" '
+        f"{count_expr} "
         f"{from_sql} "
         f"{where_sql}"
         f"GROUP BY {group_expr} "

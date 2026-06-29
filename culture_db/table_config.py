@@ -397,6 +397,32 @@ def inst1_table_has_group_company(table: str) -> bool:
     return "그룹회사코드" in INST1_TABLE_COLUMNS.get(table, ())
 
 
+# 고객당(기준년월·그룹회사코드·그룹고객식별자) 정확히 1행이 보장되는 테이블.
+# 이 테이블들끼리 조인하면 그룹고객식별자 기준 1:1이라 fan-out이 없고,
+# COUNT(DISTINCT "그룹고객식별자") == COUNT("그룹고객식별자") 가 성립한다.
+# TSHDEOA05는 PK가 (기준년월, 정보제공동의계열사구분내용, 그룹고객식별자)라
+# 한 고객이 월에 여러 행을 가질 수 있어 제외한다(조인 시 DISTINCT 필요).
+INST1_CUSTOMER_UNIQUE_TABLES: frozenset[str] = frozenset(
+    {
+        TSHDEOA01_TABLE,
+        TSHDEOA02_TABLE,
+        TSHDEOA03_TABLE,
+        TSHDEOA04_TABLE,
+        TSHDEOA06_TABLE,
+    }
+)
+
+
+def inst1_table_customer_unique(table: str) -> bool:
+    """해당 테이블이 (기준년월·그룹회사코드·그룹고객식별자)당 1행인지 여부."""
+    return table in INST1_CUSTOMER_UNIQUE_TABLES
+
+
+def inst1_join_is_customer_unique(tables) -> bool:
+    """조인에 참여한 모든 테이블이 고객당 1행이면 True (fan-out 없음)."""
+    return all(inst1_table_customer_unique(t) for t in tables)
+
+
 def inst1_join_keys_between(table_a: str, table_b: str) -> tuple[str, ...]:
     cols_a = set(INST1_TABLE_COLUMNS.get(table_a, ()))
     cols_b = set(INST1_TABLE_COLUMNS.get(table_b, ()))
