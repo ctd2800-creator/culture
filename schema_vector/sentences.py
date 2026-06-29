@@ -53,6 +53,8 @@ def column_to_sentence(table: TableMeta, col: ColumnMeta) -> str:
         f"{table.schema}.{table.table}({label}) 테이블의 컬럼 {col.name}.",
         _column_line(col),
     ]
+    if col.aliases:
+        lines.append("별칭/검색어: " + ", ".join(col.aliases))
     if table.table_comment:
         lines.append(f"테이블 설명: {table.table_comment}")
     return "\n".join(lines)

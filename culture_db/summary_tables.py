@@ -36,6 +36,14 @@ from culture_db.table_config import (
 
 _SCHEMA = TSHDEOA01_SCHEMA
 
+# 요약 테이블명 접두사 — 데이터 사전(스키마 검색) 인덱싱/검색에서 제외하는 데 사용.
+SUMMARY_TABLE_PREFIX = "요약"
+
+
+def is_summary_table(table: str) -> bool:
+    """내부 가속용 사전집계(요약) 테이블 여부."""
+    return (table or "").startswith(SUMMARY_TABLE_PREFIX)
+
 
 @dataclass(frozen=True)
 class SummarySpec:

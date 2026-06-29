@@ -6,12 +6,14 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from culture_db.summary_tables import is_summary_table
 from culture_db.table_config import (
     COLUMN_INSTANCE_IDS,
     INST1_COLUMN_DEFINITIONS,
     INST1_TABLE_ALIASES,
     INST1_TABLE_KOREAN_NAMES,
     LEGACY_EXCLUDED_TABLES,
+    inst1_column_aliases_for_table,
 )
 
 
@@ -23,6 +25,7 @@ class ColumnMeta:
     comment: str = ""
     is_pk: bool = False
     ordinal: int = 0
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -124,7 +127,7 @@ def extract_table_metadata(conn, schemas: list[str] | None = None) -> list[Table
         column_comment,
         ordinal,
     ) in rows:
-        if table_name in LEGACY_EXCLUDED_TABLES:
+        if table_name in LEGACY_EXCLUDED_TABLES or is_summary_table(table_name):
             continue
         key = (schema_name, table_name)
         if key not in tables:
@@ -159,6 +162,16 @@ def enrich_with_column_definitions(table: TableMeta) -> TableMeta:
         defn = defs.get(col.name)
         if defn:
             col.comment = defn
+    return table
+
+
+def enrich_with_column_aliases(table: TableMeta) -> TableMeta:
+    """table_config의 컬럼 별칭(검색어)을 ColumnMeta.aliases에 반영."""
+    amap = inst1_column_aliases_for_table(table.table)
+    for col in table.columns:
+        al = amap.get(col.name)
+        if al:
+            col.aliases = list(al)
     return table
 
 

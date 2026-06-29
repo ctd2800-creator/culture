@@ -26,6 +26,7 @@ from schema_vector.config import (
     schema_vector_enabled,
 )
 from schema_vector.metadata_extract import (
+    enrich_with_column_aliases,
     enrich_with_column_definitions,
     enrich_with_instance_ids,
     extract_table_metadata,
@@ -42,7 +43,10 @@ def _connect_db():
 def cmd_extract(conn, schemas: list[str], out: Path | None) -> list:
     tables = extract_table_metadata(conn, schemas)
     tables = [
-        enrich_with_instance_ids(enrich_with_column_definitions(t)) for t in tables
+        enrich_with_instance_ids(
+            enrich_with_column_aliases(enrich_with_column_definitions(t))
+        )
+        for t in tables
     ]
     print(f"extracted {len(tables)} tables from schemas {schemas}")
     if out:

@@ -369,6 +369,27 @@ INST1_GROUP_ALIASES: dict[str, dict[str, str]] = {
     TSHDEOA06_TABLE: TSHDEOA06_GROUP_ALIASES,
 }
 
+
+def inst1_column_aliases_for_table(table: str) -> dict[str, list[str]]:
+    """특정 테이블의 컬럼명 → 별칭 목록 (정규컬럼 기준 역매핑)."""
+    out: dict[str, list[str]] = {}
+    for alias, canonical in INST1_GROUP_ALIASES.get(table, {}).items():
+        out.setdefault(canonical, [])
+        if alias not in out[canonical]:
+            out[canonical].append(alias)
+    return out
+
+
+def inst1_column_alias_map() -> dict[str, list[str]]:
+    """모든 INST1 테이블 통합 컬럼명 → 별칭 목록 (검색 재랭킹용)."""
+    out: dict[str, list[str]] = {}
+    for aliases in INST1_GROUP_ALIASES.values():
+        for alias, canonical in aliases.items():
+            out.setdefault(canonical, [])
+            if alias not in out[canonical]:
+                out[canonical].append(alias)
+    return out
+
 INST1_NUMERIC_COLUMNS: dict[str, frozenset[str]] = {
     TSHDEOA01_TABLE: TSHDEOA01_NUMERIC_COLUMNS,
     TSHDEOA02_TABLE: TSHDEOA02_NUMERIC_COLUMNS,
